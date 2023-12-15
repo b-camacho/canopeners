@@ -90,7 +90,7 @@ impl Emergency {
 }
 
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 enum SdoType {
     Expedited,
     Segmented,
@@ -315,21 +315,23 @@ impl Conn {
 
 use std::collections::HashMap;
 
-#[derive(Debug, Clone)]
-struct ObjectDictionary {
-    pub data: HashMap<u16, Vec<u8>>,
-}
 
-impl ObjectDictionary {
-    fn new() -> Self {
-        ObjectDictionary {
-            data: HashMap::new(),
-        }
-    }
+type ObjectDictionary = HashMap<u16, Vec<u8>>;
+//#[derive(Debug, Clone)]
+//struct ObjectDictionary {
+//    pub data: HashMap<u16, Vec<u8>>,
+//}
+//
+//impl ObjectDictionary {
+//    fn new() -> Self {
+//        ObjectDictionary {
+//            data: HashMap::new(),
+//        }
+//    }
+//
+//}
 
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct Node {
     conn: Conn,
     object_dictionary: ObjectDictionary,
@@ -348,16 +350,7 @@ impl Node {
             match self.conn.recv() {
                 Ok(Message::Sdo(sdo)) => {
                     if sdo.sdo_type == SdoType::Expedited && (sdo.command & 0x2F) == 0x20 {
-                        // Handle expedited SDO write
-                        // Here, sdo.index is the object dictionary index to write to
-                        // sdo.data contains the data to write
-
-                        // Update the object dictionary
                         self.object_dictionary.insert(sdo.index, sdo.data.to_vec());
-
-                        // Respond to the SDO write request
-                        // The specifics of this response depend on your CANOpen implementation
-                        // Typically, a confirmation message is sent back
                         self.send_sdo_confirmation(sdo.node_id, sdo.index, sdo.sub_index);
                     }
                 },
@@ -372,7 +365,7 @@ impl Node {
         }
     }
 
-   fn send_sdo_confirmation(&self, node_id: u8, index: u16, sub_index: u8) -> io::Result<()> {
+   fn send_sdo_confirmation(&self, node_id: u8, index: u16, sub_index: u8) {
         // Create an SDO confirmation frame
         // For an expedited write confirmation, the command specifier is generally 0x60 combined with the sub command
         let command_specifier = 0x60;
@@ -389,9 +382,8 @@ impl Node {
         // Create the frame and send it
         let frame = mk_can_frame(cob_id, &data);
             
-        self.conn.socket.write_frame_insist(&frame)?;
+        self.conn.socket.write_frame_insist(&frame);
 
-        Ok(())
     }
 
    fn extract_tpdo_configs(&self) -> Vec<(u32, TpdoType, Vec<(u16, u8, u8)>)> {
@@ -414,13 +406,13 @@ impl Node {
 
     fn parse_pdo_config(&self, pdo_index: u16) -> Option<(u32, TpdoType, Vec<(u16, u8, u8)>)> {
         // COB-ID for the PDO, defaulting to 0x180 + node_id
-        let cob_id = self.object_dictionary.get(pdo_index).unwrap_or(&vec![0x00, 0x01]).clone();
+        let cob_id = self.object_dictionary.get(&pdo_index).unwrap_or(&vec![0x00, 0x01]).clone();
 
         // Parse the COB-ID (assuming it's 4 bytes, little endian)
         let cob_id = u32::from_le_bytes([cob_id[0], cob_id[1], cob_id[2], cob_id[3]]);
 
         // Get the transmission type
-        let type_field = self.object_dictionary.get(pdo_index + 1).unwrap_or(&vec![0x00]).clone();
+        let type_field = self.object_dictionary.get(&(pdo_index + 1)).unwrap_or(&vec![0x00]).clone();
         let tpdo_type = match type_field[0] {
             0 => TpdoType::AcyclicSynchronous,
             1..=240 => TpdoType::CyclicSynchronous(type_field[0]),
@@ -477,7 +469,7 @@ impl Node {
         // Construct the TPDO data based on the mappings
         let mut tpdo_data = Vec::new();
         for (index, sub_index, length) in mappings {
-            if let Some(data) = self.object_dictionary.get(*index) {
+            if let Some(data) = self.object_dictionary.get(index) {
                 // Extract the specified bytes from the object dictionary entry
                 // Placeholder: Implement logic to handle sub-indices and lengths
                 tpdo_data.extend_from_slice(data);
@@ -487,10 +479,6 @@ impl Node {
     }
 
     fn send_tpdo(&self, cob_id: u32, data: &[u8]) -> Result<(), CanOpenError> {
-        if data.len() > 8 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "TPDO data exceeds 8 bytes"));
-        }
-
         let frame = mk_can_frame(cob_id as u16, data);
 
         self.conn.socket.write_frame_insist(&frame);
