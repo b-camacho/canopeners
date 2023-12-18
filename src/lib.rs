@@ -1,121 +1,177 @@
 use socketcan::Id;
 use socketcan::Frame;
 use socketcan::EmbeddedFrame;
+use binrw::{
+    binrw,
+    BinRead,
+    BinWrite,
+};
 
 
-// CANOpen ids can only be standard (11bit), not extended (29bit)
+trait FrameRW {
+    fn encode(&self, frame: &mut socketcan::CanFrame);
+    fn decode(frame: &socketcan::CanFrame) -> Result<Self, CanOpenError> where Self : Sized;
+    //fn id(&self) -> Option<u16>;
+
+}
+
+// CAN ids can only be standard (11bit), not extended (29bit)
+// but CANOpen only uses standard
 // returns None when CanFrame has extended ID
-fn id_as_raw_std(frame: &socketcan::CanFrame) -> Option<u16> {
+fn id_as_raw_std(frame: &socketcan::CanFrame) -> Result<u16, CanOpenError> {
     if let Id::Standard(sid) = frame.id() {
-        Some(sid.as_raw())
+        Ok(sid.as_raw())
     } else {
-        None
+        Err(CanOpenError::CanVersion("got extended (29bit) id, expected standard (11bit) id".to_owned()))
     }
+}
+
+
+// todo: I think node_ids are u8s actually
+fn u16_as_id(id: u16) -> socketcan::StandardId {
+    socketcan::StandardId::new(id).unwrap()
 }
 
 fn mk_can_frame(cob_id: u16, data: &[u8]) -> socketcan::CanDataFrame {
     socketcan::CanDataFrame::new(socketcan::StandardId::new(cob_id).unwrap(), data).unwrap()
 }
 
+#[binrw]
+#[brw(little)]
 #[derive(Clone, Debug)]
-struct Nmt {
+pub struct Nmt {
     nmt_function: NmtFunction,
     target_node: u8,
 }
 
-impl Nmt {
-    fn parse_from_frame(frame: &socketcan::CanFrame) -> Option<Self> {
-        if id_as_raw_std(frame)? != 0x000 || frame.dlc() != 2 {
-            return None;
-        }
+impl FrameRW for Nmt {
+    fn decode(frame: &socketcan::CanFrame) -> Result<Nmt, CanOpenError> {
+        let mut c = std::io::Cursor::new(frame.data());
+        Nmt::read(&mut c).map_err(|binrw_err| CanOpenError::ParseError(binrw_err.to_string()))
 
-        let data = frame.data();
-        Some(Self {
-            nmt_function: NmtFunction::from_byte(data[0])?,
-            target_node: data[1],
-        })
+        //Some(Self {
+        //    nmt_function: NmtFunction::from_byte(data[0])?,
+        //    target_node: data[1],
+        //})
     }
+
+    fn encode(&self, frame: &mut socketcan::CanFrame) {
+        frame.set_id(u16_as_id(0x000));
+        let mut c = std::io::Cursor::new(Vec::new());
+        self.write(&mut c);
+        frame.set_data(c.get_ref());
+    }
+
+    //fn id(&self) -> Option<u16> {
+    //    None
+    //}
 }
 
+#[binrw]
+#[br(repr(u8))]
+#[bw(repr(u8))]
 #[derive(Clone, Debug)]
-enum NmtFunction {
-    EnterOperational,
-    EnterStop,
-    EnterPreOperational,
-    ResetNode,
-    ResetCommunication,
-}
-
-impl NmtFunction {
-    fn from_byte(byte: u8) -> Option<Self> {
-        match byte {
-            0x01 => Some(NmtFunction::EnterOperational),
-            0x02 => Some(NmtFunction::EnterStop),
-            0x80 => Some(NmtFunction::EnterPreOperational),
-            0x81 => Some(NmtFunction::ResetNode),
-            0x82 => Some(NmtFunction::ResetCommunication),
-            _ => None,
-        }
-    }
+pub enum NmtFunction {
+    EnterOperational = 0x01,
+    EnterStop = 0x02,
+    EnterPreOperational = 0x80,
+    ResetNode = 0x81,
+    ResetCommunication = 0x82,
 }
 
 
 #[derive(Debug)]
-struct Emergency {
-    node_id: u8,
+#[binrw]
+#[brw(little)]
+pub struct Emergency {
+    #[brw(ignore)] node_id: u8,
     error_code: u16,
     error_register: u8,
     vendor_specific_data: [u8; 5], // Assuming 5 bytes of vendor-specific data
 }
 
-impl Emergency {
-    fn parse_from_frame(frame: &socketcan::CanFrame) -> Option<Self> {
+impl FrameRW for Emergency {
+    fn decode(frame: &socketcan::CanFrame) -> Result<Emergency, CanOpenError> {
         let data = frame.data();
         if data.len() < 8 {
-            return None; // Not a valid Emergency message (less than 8 bytes)
+            return Err(CanOpenError::ParseError("not a valid Emergency message, need at least 8 bytes".to_owned()));
         }
+        let mut res = Emergency::read(&mut std::io::Cursor::new(data));
 
         let error_code = u16::from_be_bytes([data[0], data[1]]);
         let error_register = data[2];
         let mut vendor_specific_data = [0u8; 5];
         vendor_specific_data.copy_from_slice(&data[3..8]);
 
-        Some(Emergency {
+        Ok(Emergency {
             node_id: (id_as_raw_std(frame)? - 0x080) as u8,
             error_code,
             error_register,
             vendor_specific_data,
         })
     }
+
+    fn encode(&self, frame: &mut socketcan::CanFrame) {
+        frame.set_id(u16_as_id(self.node_id as u16));
+        let mut c = std::io::Cursor::new(Vec::new());
+        self.write(&mut c);
+        frame.set_data(c.get_ref());
+    }
 }
 
 
 #[derive(Debug, PartialEq, Eq)]
-enum SdoType {
+pub enum SdoType {
     Expedited,
     Segmented,
 }
+impl SdoType {
+    pub(crate) fn from_byte(command: u8) -> Self {
+        if command & 0x02 != 0 { SdoType::Expedited } else { SdoType::Segmented }
+    }
 
+}
+
+#[binrw]
+#[brw(little)]
 #[derive(Debug)]
-struct Sdo {
+pub struct Sdo {
+    #[brw(ignore)]
     node_id: u8, // Derived from the header
+
     command: u8,
     index: u16,
     sub_index: u8,
     data: [u8; 4], // Data (up to 4 bytes, can be less or unused based on command)
+    #[bw(ignore)]
+    #[br(calc = SdoType::from_byte(command))]
     sdo_type: SdoType,
 }
 
 impl Sdo {
-    fn parse_from_frame(frame: &socketcan::CanFrame) -> Option<Self> {
-        let data = frame.data();
-        if data.len() < 8 {
-            return None; // Not a valid SDO message (less than 8 bytes)
+    pub fn new(node_id: u8, command: u8, index: u16, sub_index: u8, data: &[u8]) {
+        Sdo {
+            node_id,
+            command,
+            index,
+            sub_index,
+            data,
+            sdo_type: SdoType::from_byte(command)
+
         }
+
+
+    }
+
+}
+
+impl FrameRW for Sdo {
+    fn decode(frame: &socketcan::CanFrame) -> Result<Sdo, CanOpenError> {
+        let data = frame.data();
 
         let id = id_as_raw_std(frame)?;
         if !(id >= 0x580 && id <= 0x5FF) && !(id >= 0x600 && id <= 0x67F) {
-            return None; // Not a valid SDO COB-ID
+            return Err(CanOpenError::BadMessage(format!("{id} is not an SDO can id").to_owned())); // Not a valid SDO COB-ID
         }
 
         let node_id = (id & 0x7F) as u8;
@@ -127,7 +183,7 @@ impl Sdo {
         // Determine the SDO type (expedited or segmented) from the command byte
         let sdo_type = if data[0] & 0x02 != 0 { SdoType::Expedited } else { SdoType::Segmented };
 
-        Some(Sdo {
+        Ok(Sdo {
             node_id,
             command: data[0],
             index,
@@ -136,94 +192,120 @@ impl Sdo {
             sdo_type,
         })
     }
+
+    fn encode(&self, frame: &mut socketcan::CanFrame) {
+        frame.set_id(u16_as_id(self.node_id.into()));
+        let mut c = std::io::Cursor::new(Vec::new());
+        self.write(&mut c);
+        frame.set_data(c.get_ref());
+    }
 }
 
 
-#[derive(Debug)]
-enum GuardStatus {
-    Boot,
-    Stopped,
-    Operational,
-    PreOperational,
+#[derive(Debug, Copy, Clone)]
+#[repr(u8)]
+pub enum GuardStatus {
+    Boot = 0x00,
+    Stopped = 0x04,
+    Operational = 0x05,
+    PreOperational = 0x7F,
 }
 
-impl GuardStatus {
-    fn from_byte(byte: u8) -> Option<Self> {
-        match byte {
-            0x00 => Some(GuardStatus::Boot),
-            0x04 => Some(GuardStatus::Stopped),
-            0x05 => Some(GuardStatus::Operational),
-            0x7F => Some(GuardStatus::PreOperational),
-            _ => None,
+impl TryFrom<u8> for GuardStatus {
+    type Error = String;
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0x00 => Ok(GuardStatus::Boot),
+            0x04 => Ok(GuardStatus::Stopped),
+            0x05 => Ok(GuardStatus::Operational),
+            0x7F => Ok(GuardStatus::PreOperational),
+            _ => Err(format!("{value:x} not a valid guard status").to_owned())
         }
     }
 }
 
+#[binrw]
+#[brw(little)]
 #[derive(Debug)]
-struct Guard {
+pub struct Guard {
+    #[brw(ignore)]
     node_id: u8, // Derived from the header
+
+    #[br(temp)]
+    #[bw(calc = (*status as u8)  | ((*toggle_bit as u8) << 7))]
+    raw_byte: u8,
+
+    #[br(calc = raw_byte & 0x80 != 0)]
+    #[bw(ignore)]
     toggle_bit: bool,
+
+    #[br(try_map = |x: u8| (x & 0x7F).try_into())]
+    #[bw(ignore)]
     status: GuardStatus,
 }
 
-impl Guard {
-    fn parse_from_frame(frame: &socketcan::CanFrame) -> Option<Self> {
+impl FrameRW for Guard {
+    fn decode(frame: &socketcan::CanFrame) -> Result<Guard, CanOpenError> {
         let data = frame.data();
         if data.len() < 1 {
-            return None;
+            return Err(CanOpenError::ParseError("data too short".to_owned()));
         }
 
         let id = id_as_raw_std(frame)?;
         if id < 0x700 || id > 0x77F {
-            return None;
+            return Err(CanOpenError::BadMessage("wrong id".to_owned()));
         }
+        Guard::read(&mut std::io::Cursor::new(&data)).map_err(|e| CanOpenError::ParseError(format!("no parse: {e}")))
+    }
 
-        let node_id = (id - 0x700) as u8;
-        let toggle_bit = data[0] & 0x80 != 0;
-        let status_byte = data[0] & 0x7F;
-
-        Some(Guard {
-            node_id,
-            toggle_bit,
-            status: GuardStatus::from_byte(status_byte)?,
-        })
+    fn encode(&self, frame: &mut socketcan::CanFrame) {
+        frame.set_id(u16_as_id(self.node_id as u16));
+        let mut c = std::io::Cursor::new(Vec::new());
+        self.write(&mut c);
+        frame.set_data(c.get_ref());
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 enum Rxtx {
     RX,
     TX,
 }
 
 #[derive(Debug)]
-struct Pdo {
+pub struct Pdo {
     pdo_index: u8, // PDO index (1 to 4)
     rxtx: Rxtx,
     node_id: u8, // Derived from the header
     data: Vec<u8>, // Data (1 to 8 bytes)
 }
 
-impl Pdo {
-    fn parse_from_frame(frame: &socketcan::CanFrame) -> Option<Self> {
+impl FrameRW for Pdo {
+    fn decode(frame: &socketcan::CanFrame) -> Result<Pdo, CanOpenError> {
         let id = id_as_raw_std(frame)?;
         let data = frame.data().to_vec();
 
         // Determine RX/TX and PDO index from the COB-ID
-        let (rxtx, pdo_index) = match id {
-            0x180..=0x1FF => (Rxtx::TX, (id - 0x180) as u8),
-            0x200..=0x27F => (Rxtx::RX, (id - 0x200) as u8),
-            _ => return None, // Not a valid PDO COB-ID
-        };
+        let rxtx = if id & 0x80 == 0 {
+            Rxtx::TX
+        } else { Rxtx::RX };
+
+        // this is a bit odd, RX indicies are offset by one
+        let pdo_index = ((id & 0x700) as u8) + if rxtx == Rxtx::RX { 1 } else { 0 }; 
 
         let node_id = (id & 0x7F) as u8;
 
-        Some(Pdo {
+        Ok(Pdo {
             pdo_index,
             rxtx,
             node_id,
             data,
         })
+    }
+
+    fn encode(&self, frame: &mut socketcan::CanFrame) {
+        frame.set_id(u16_as_id(self.node_id as u16));
+        frame.set_data(&self.data);
     }
 }
 
@@ -238,24 +320,30 @@ enum TpdoType {
 }
 
 #[derive(Debug)]
-struct Sync;
+pub struct Sync;
 
-impl Sync {
-    fn parse_from_frame(frame: &socketcan::CanFrame) -> Option<Self> {
+impl FrameRW for Sync {
+    fn decode(frame: &socketcan::CanFrame) -> Result<Sync, CanOpenError> {
         let id = id_as_raw_std(frame)?;
         if id != 0x80 {
-            return None; // Not a valid Sync COB-ID
+            return Err(todo!()); // Not a valid Sync COB-ID
         }
 
         if !frame.data().is_empty() {
-            return None; // Sync message should not have any data
+            return Err(todo!()); // Sync message should not have any data
         }
 
-        Some(Sync {})
+        Ok(Sync {})
+    }
+
+    fn encode(&self, frame: &mut socketcan::CanFrame) {
+        frame.set_id(u16_as_id(0x80));
+        frame.set_data(&[]);
     }
 }
 
-enum Message {
+#[derive(Debug)]
+pub enum Message {
     Nmt(Nmt),
     Sync(Sync),
     Emergency(Emergency),
@@ -268,14 +356,20 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum CanOpenError {
+    #[error("FrameRW protocl is not {0}")]
+    BadMessage(String),
+
     #[error("Connection error: {0}")]
     ConnectionError(String),
+
+    #[error("CAN version mismatch: {0}")]
+    CanVersion(String),
 
     #[error("Parse error: {0}")]
     ParseError(String),
 
     #[error("Unknown message type with COB-ID: {0}")]
-    UnknownMessageType(u32),
+    UnknownFrameRWType(u32),
 
     #[error("IO Error: {0}")]
     IOError(std::io::Error),
@@ -283,33 +377,76 @@ pub enum CanOpenError {
 
 
 #[derive(Debug)]
-struct Conn {
+pub struct Conn {
     socket: socketcan::CanSocket,
 }
 use socketcan::Socket;
 
 impl Conn {
-    fn new(interface_name: &str) -> Result<Self, CanOpenError> {
+    pub fn new(interface_name: &str) -> Result<Self, CanOpenError> {
         let socket = socketcan::CanSocket::open(interface_name).expect("no iface");
         Ok(Conn { socket })
     }
 
-    fn recv(&self) -> Result<Message, CanOpenError> {
+    pub fn recv(&self) -> Result<Message, CanOpenError> {
         let frame = self.socket.read_frame()
             .map_err(|e| CanOpenError::ConnectionError(e.to_string()))?;
+        Self::decode(&frame)
+        //match p {
+        //    Message::Nmt => { 
+        //        Message::Nmt(Nmt::decode(&frame)?);
+        //    },
+        //    Message::Sync => Sync::decode(&frame).map(Box::new),
+        //    //Message::Emergency => Emergency::decode(&frame).map(Box::new),
+        //    //Message::Pdo => Pdo::decode(&frame).map(Box::new),
+        //    //Message::Sdo => Sdo::decode(&frame).map(Box::new),
+        //    //Message::Guard => Guard::decode(&frame).map(Box::new),
+        //};
 
-        let message = if let Some(nmt) = Nmt::parse_from_frame(&frame) {
-            Some(Message::Nmt(nmt))
-        } else if let Some(sync) = Sync::parse_from_frame(&frame) {
-            Some(Message::Sync(sync))
-        } else if let Some(emergency) = Emergency::parse_from_frame(&frame) {
-            Some(Message::Emergency(emergency))
-        } else if let Some(sdo) = Sdo::parse_from_frame(&frame) {
-            Some(Message::Sdo(sdo))
-        } else if let Some(guard) = Guard::parse_from_frame(&frame) {
-            Some(Message::Guard(guard))
-        } else { Pdo::parse_from_frame(&frame).map(Message::Pdo) };
-        message.ok_or(CanOpenError::ParseError("frame {frame:?} did not parse as any canopen function".to_owned()))
+
+        //let message = if let Some(nmt) = Nmt::decode(&frame) {
+        //    Some(FrameRW::Nmt(nmt))
+        //} else if let Some(sync) = Sync::decode(&frame) {
+        //    Some(FrameRW::Sync(sync))
+        //} else if let Some(emergency) = Emergency::decode(&frame) {
+        //    Some(FrameRW::Emergency(emergency))
+        //} else if let Some(sdo) = Sdo::decode(&frame) {
+        //    Some(FrameRW::Sdo(sdo))
+        //} else if let Some(guard) = Guard::decode(&frame) {
+        //    Some(FrameRW::Guard(guard))
+        //} else { Pdo::decode(&frame).map(FrameRW::Pdo) };
+        //message.ok_or(CanOpenError::ParseError("frame {frame:?} did not decode as any canopen function".to_owned()))
+    }
+
+    pub fn send(&self, message: Message) -> Result<(), CanOpenError> {
+        let mut frame = socketcan::CanFrame::new(socketcan::Id::Standard(socketcan::StandardId::new(0).unwrap()), &[]).unwrap();
+        match message {
+            Message::Sdo(sdo) => sdo.encode(&mut frame),
+            Message::Sync(sync) => sync.encode(&mut frame),
+            _ => todo!()
+        }
+        self.socket.write_frame(&frame).map_err(CanOpenError::IOError)
+    }
+
+    fn decode(frame: &socketcan::CanFrame) -> Result<Message, CanOpenError> {
+        let id = id_as_raw_std(&frame).unwrap();
+        // can_id is node_id + protocol_id (same as function id)
+        // can_ids are always <128
+        // mask out lowest 7 bits to just get the protocol_id
+        let protocol_id = id & 0xFF80;
+        // apply the opposite mask for node_id
+        let node_id = id & 0x007F;
+        let p = match protocol_id {
+            0x000 => Message::Nmt(Nmt::decode(frame)?),
+            0x080 if node_id == 0 => Message::Sync(Sync::decode(frame)?),
+            0x080 => Message::Emergency(Emergency::decode(frame)?),
+            0x180..=0x500 => Message::Pdo(Pdo::decode(frame)?),
+            0x580..=0x600 => Message::Sdo(Sdo::decode(frame)?),
+            0x700 => Message::Guard(Guard::decode(frame)?),
+            _ => todo!()
+        };
+        Ok(p)
+
     }
 }
 
@@ -332,7 +469,7 @@ type ObjectDictionary = HashMap<u16, Vec<u8>>;
 //}
 
 #[derive(Debug)]
-struct Node {
+pub struct Node {
     conn: Conn,
     object_dictionary: ObjectDictionary,
 }
@@ -396,7 +533,7 @@ impl Node {
 
         for i in 0..NUMBER_OF_TPDOS {
             let pdo_index = TPDO_CONFIG_START_INDEX + i;
-            if let Some((cob_id, tpdo_type, mappings)) = self.parse_pdo_config(pdo_index) {
+            if let Some((cob_id, tpdo_type, mappings)) = self.decode_pdo_config(pdo_index) {
                 tpdo_configs.push((cob_id, tpdo_type, mappings));
             }
         }
@@ -404,7 +541,7 @@ impl Node {
         tpdo_configs
     }
 
-    fn parse_pdo_config(&self, pdo_index: u16) -> Option<(u32, TpdoType, Vec<(u16, u8, u8)>)> {
+    fn decode_pdo_config(&self, pdo_index: u16) -> Option<(u32, TpdoType, Vec<(u16, u8, u8)>)> {
         // COB-ID for the PDO, defaulting to 0x180 + node_id
         let cob_id = self.object_dictionary.get(&pdo_index).unwrap_or(&vec![0x00, 0x01]).clone();
 
