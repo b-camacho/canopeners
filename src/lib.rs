@@ -7,6 +7,9 @@ use binrw::{
     BinWrite,
 };
 
+pub mod enums;
+
+
 
 trait FrameRW {
     fn encode(&self, frame: &mut socketcan::CanFrame);
@@ -40,8 +43,14 @@ fn mk_can_frame(cob_id: u16, data: &[u8]) -> socketcan::CanDataFrame {
 #[brw(little)]
 #[derive(Clone, Debug)]
 pub struct Nmt {
-    nmt_function: NmtFunction,
-    target_node: u8,
+    pub function: NmtFunction,
+    pub target_node: u8,
+}
+
+impl Nmt {
+    pub fn new(function: NmtFunction, target_node: u8) -> Self {
+        Self { function, target_node }
+    }
 }
 
 impl FrameRW for Nmt {
@@ -49,10 +58,6 @@ impl FrameRW for Nmt {
         let mut c = std::io::Cursor::new(frame.data());
         Nmt::read(&mut c).map_err(|binrw_err| CanOpenError::ParseError(binrw_err.to_string()))
 
-        //Some(Self {
-        //    nmt_function: NmtFunction::from_byte(data[0])?,
-        //    target_node: data[1],
-        //})
     }
 
     fn encode(&self, frame: &mut socketcan::CanFrame) {
@@ -62,9 +67,6 @@ impl FrameRW for Nmt {
         frame.set_data(c.get_ref());
     }
 
-    //fn id(&self) -> Option<u16> {
-    //    None
-    //}
 }
 
 #[binrw]
@@ -80,15 +82,55 @@ pub enum NmtFunction {
 }
 
 
-#[derive(Debug)]
 #[binrw]
 #[brw(little)]
+#[derive(Debug)]
 pub struct Emergency {
-    #[brw(ignore)] node_id: u8,
-    error_code: u16,
-    error_register: u8,
-    vendor_specific_data: [u8; 5], // Assuming 5 bytes of vendor-specific data
+    #[brw(ignore)]
+    node_id: u8,
+
+    #[br(temp)]
+    #[bw(calc =  enums::EmergencyErrorCode::encode(error_code))]
+    error_code_raw: u16,
+
+    #[br(try_calc = enums::EmergencyErrorCode::decode(error_code_raw))]
+    #[bw(ignore)]
+    error_code: enums::EmergencyErrorCode,
+
+    #[br(temp)]
+    #[bw(calc = enums::EmergencyErrorRegister::encode(error_register))]
+    error_register_raw: u8,
+
+    #[br(calc = enums::EmergencyErrorRegister::decode(error_register_raw))]
+    #[bw(ignore)]
+    error_register: Vec<enums::EmergencyErrorRegister>,
+
+    vendor_specific: [u8; 5],
+
 }
+
+impl Emergency {
+    pub fn new(node_id: u8,
+               error_code: enums::EmergencyErrorCode,
+               error_register: Vec<enums::EmergencyErrorRegister>,
+               vendor_specific: &[u8]) -> Self {
+        Self {
+            node_id,
+            error_code,
+            error_register,
+            vendor_specific: Self::to_vendor_specific(vendor_specific), 
+
+        }
+    }
+
+    fn to_vendor_specific(data: &[u8]) -> [u8; 5] {
+        let mut arr = [0u8; 5];
+        arr[0..data.len()].copy_from_slice(data);
+        arr
+    }
+
+}
+
 
 impl FrameRW for Emergency {
     fn decode(frame: &socketcan::CanFrame) -> Result<Emergency, CanOpenError> {
@@ -96,23 +138,14 @@ impl FrameRW for Emergency {
         if data.len() < 8 {
             return Err(CanOpenError::ParseError("not a valid Emergency message, need at least 8 bytes".to_owned()));
         }
-        let mut res = Emergency::read(&mut std::io::Cursor::new(data));
-
-        let error_code = u16::from_be_bytes([data[0], data[1]]);
-        let error_register = data[2];
-        let mut vendor_specific_data = [0u8; 5];
-        vendor_specific_data.copy_from_slice(&data[3..8]);
-
-        Ok(Emergency {
-            node_id: (id_as_raw_std(frame)? - 0x080) as u8,
-            error_code,
-            error_register,
-            vendor_specific_data,
-        })
+        let id = id_as_raw_std(frame)?;
+        Emergency::read(&mut std::io::Cursor::new(data))
+            .map_err(|e| CanOpenError::ParseError(format!("binrw err: {e}")))
+            .map(|mut m| { m.node_id = (id - 0x080) as u8; m})
     }
 
     fn encode(&self, frame: &mut socketcan::CanFrame) {
-        frame.set_id(u16_as_id(self.node_id as u16));
+        frame.set_id(u16_as_id(0x80 + self.node_id as u16));
         let mut c = std::io::Cursor::new(Vec::new());
         self.write(&mut c);
         frame.set_data(c.get_ref());
@@ -120,47 +153,185 @@ impl FrameRW for Emergency {
 }
 
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum SdoType {
-    Expedited,
-    Segmented,
+
+#[derive(Debug)]
+pub struct Sdo {
+    pub node_id: u8, // Derived from the header
+    pub command: SdoCmd, // command specifier
+    pub rxtx: Rxtx,
 }
-impl SdoType {
-    pub(crate) fn from_byte(command: u8) -> Self {
-        if command & 0x02 != 0 { SdoType::Expedited } else { SdoType::Segmented }
+
+#[derive(Debug)]
+pub enum SdoCmd {
+    WriteExpeditedRx(SdoWriteExpeditedRx),
+    WriteExpeditedTx(SdoWriteExpeditedTx),
+}
+
+#[derive(Debug)]
+pub struct SdoWriteExpeditedRx {
+    pub index: u16,
+    pub sub_index: u8,
+    pub data: Box<[u8]>, // Data (up to 4 bytes, can be less or unused based on command)
+}
+
+impl SdoWriteExpeditedRx {
+    fn encode(&self, frame: &mut socketcan::CanFrame) {
+        let mut data = [0u8; 8];
+        let mut scs = 0b00100000;
+        let l = match self.data.len() {
+            1 => 0b11,
+            2 => 0b10,
+            3 => 0b01,
+            4 => 0b00,
+            _ => unreachable!()
+        };
+        scs |= l << 2;
+        scs |= 0b11;
+        data[0] = scs;
+        data[1..3].copy_from_slice(&self.index.to_le_bytes());
+        data[3] = self.sub_index;
+        data[4..4+self.data.len()].copy_from_slice(&self.data);
+        frame.set_data(&data).unwrap();
+    }
+
+    fn decode(frame: &socketcan::CanFrame) -> Result<Self, CanOpenError> {
+        let l = match (frame.data()[0] & 0b00001100) >> 2 {
+            0b11 => 1,
+            0b10 => 2,
+            0b01 => 3,
+            0b00 => 4,
+            // this path is technically unreachable, it must be a regression
+            _ => return Err(CanOpenError::ParseError("logic bug while decoding sdo".to_owned()))
+            
+        };
+        let index = u16::from_le_bytes(
+            frame.data()[1..3].try_into().map_err(|_| CanOpenError::ParseError("not enough data".to_owned()))
+            ?);
+        let sub_index = frame.data()[3];
+
+        let mut data = Vec::with_capacity(l);
+        data.extend_from_slice(&frame.data()[4..4+l]);
+        Ok(Self {
+            index,
+            sub_index,
+            data: data.into()
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct SdoWriteExpeditedTx {
+    pub index: u16,
+    pub sub_index: u8,
+}
+
+
+impl SdoWriteExpeditedTx {
+    fn encode(&self, frame: &mut socketcan::CanFrame) {
+        let mut data = [0u8; 8];
+        data[0] = 0b01100000;
+        data[1..3].copy_from_slice(&self.index.to_le_bytes());
+        data[3] = self.sub_index;
+        frame.set_data(&data);
+    }
+
+    fn decode(frame: &socketcan::CanFrame) -> Result<Self, CanOpenError> {
+        let index = u16::from_le_bytes(
+            frame.data()[1..3].try_into().map_err(|_| CanOpenError::ParseError("not enough data".to_owned()))
+            ?);
+        let sub_index = frame.data()[3];
+
+        Ok(Self {index, sub_index})
     }
 
 }
 
-#[binrw]
-#[brw(little)]
-#[derive(Debug)]
-pub struct Sdo {
-    #[brw(ignore)]
-    node_id: u8, // Derived from the header
 
-    command: u8,
-    index: u16,
-    sub_index: u8,
-    data: [u8; 4], // Data (up to 4 bytes, can be less or unused based on command)
-    #[bw(ignore)]
-    #[br(calc = SdoType::from_byte(command))]
-    sdo_type: SdoType,
+/// SDO Command Specifier
+/// SDOs let you read/write object dictionary keys
+/// An expedited SDO message carries at most 4 bytes
+/// Segmented SDOs are for sending more than 4 bytes
+/// As usual in embedded, comms are from the perspective of the embedded device,
+/// so download = client to server, upload = server to client.
+///
+/// When writing less than 4 bytes, you send a `InitiateDownload` RX,
+/// the device ACKs it with `InitiateDownload` TX
+///
+/// When writing more than 4 bytes, you send an `InitiateDownload` RX
+/// with the "segmented" flag set and the # of bytes you'll send in the data field.
+/// The device still acks this with `InitiateDownload` TX.
+/// After this, you send each segment with a `DownloadSegment`. The device still ACKs each segment.
+/// The `DownloadSegment` TX can carry at most 8 bytes
+///
+/// Reading works symmetrically to writing
+#[derive(Debug, PartialEq)]
+enum SdoCs {
+    DownloadSegment,
+    InitiateDownload,
+    InitiateUpload,
+    UploadSegment,
+    AbortTransfer,
+    BlockUpload,
+    BlockDownload,
 }
 
+impl SdoCs {
+    pub fn from_byte(byte: u8, rxtx: Rxtx) -> Result<SdoCs, CanOpenError> {
+        use SdoCs::*;
+        let v = match (rxtx, byte >> 5) {
+            // meaning of the command specifier is slightly different for Rx and Tx
+            // thx: https://github.com/wireshark/wireshark/blob/master/epan/dissectors/packet-canopen.c#L511
+            (Rxtx::RX, 0x00) => DownloadSegment,
+            (Rxtx::RX, 0x01) => InitiateDownload,
+            (Rxtx::RX, 0x02) => InitiateUpload,
+            (Rxtx::RX, 0x03) => UploadSegment,
+
+            (Rxtx::TX, 0x00) => UploadSegment,
+            (Rxtx::TX, 0x01) => DownloadSegment,
+            (Rxtx::TX, 0x02) => InitiateUpload,
+            (Rxtx::TX, 0x03) => InitiateDownload,
+
+            (_, 0x04) => AbortTransfer,
+            (_, 0x05) => BlockUpload,
+            (_, 0x06) => BlockDownload,
+            _ => return Err(CanOpenError::ParseError(format!("bad client command specifier: {}", byte)))
+        };
+        Ok(v)
+    }
+    pub fn to_byte(&self, rxtx: Rxtx) -> u8 {
+        match (rxtx, self) {
+            (Rxtx::RX, SdoCs::DownloadSegment) => 0x00,
+            (Rxtx::RX, SdoCs::InitiateDownload) => 0x01,
+            (Rxtx::RX, SdoCs::InitiateUpload) => 0x02,
+            (Rxtx::RX, SdoCs::UploadSegment) => 0x03,
+
+            (Rxtx::TX, SdoCs::UploadSegment) => 0x00,
+            (Rxtx::TX, SdoCs::DownloadSegment) => 0x01,
+            (Rxtx::TX, SdoCs::InitiateUpload) => 0x02,
+            (Rxtx::TX, SdoCs::InitiateDownload) => 0x03,
+
+            (_, SdoCs::AbortTransfer) => 0x04,
+            (_, SdoCs::BlockUpload) => 0x05,
+            (_, SdoCs::BlockDownload) => 0x06,
+        }
+    }
+}
+
+
 impl Sdo {
-    pub fn new(node_id: u8, command: u8, index: u16, sub_index: u8, data: &[u8]) {
+    pub fn new_write(node_id: u8, index: u16, sub_index: u8, data: Box<[u8]>) -> Sdo {
         Sdo {
             node_id,
-            command,
-            index,
-            sub_index,
-            data,
-            sdo_type: SdoType::from_byte(command)
-
+            rxtx: Rxtx::RX,
+            command: SdoCmd::WriteExpeditedRx(SdoWriteExpeditedRx{index, sub_index, data}),
         }
-
-
+    }
+    pub fn new_write_resp(node_id: u8, index: u16, sub_index: u8) -> Sdo {
+        Sdo {
+            node_id,
+            rxtx: Rxtx::TX,
+            command: SdoCmd::WriteExpeditedTx(SdoWriteExpeditedTx{index, sub_index}),
+        }
     }
 
 }
@@ -175,29 +346,43 @@ impl FrameRW for Sdo {
         }
 
         let node_id = (id & 0x7F) as u8;
-        let index = u16::from_le_bytes([data[1], data[2]]);
-        let sub_index = data[3];
-        let mut sdo_data = [0u8; 4];
-        sdo_data.copy_from_slice(&data[4..8]);
+        let rxtx = Rxtx::from_u16_sdo(id);
 
-        // Determine the SDO type (expedited or segmented) from the command byte
-        let sdo_type = if data[0] & 0x02 != 0 { SdoType::Expedited } else { SdoType::Segmented };
-
-        Ok(Sdo {
+        let command_byte = data[0];
+        let command_spec = SdoCs::from_byte(data[0], rxtx)?;
+        let command = match (rxtx, command_spec) {
+            (Rxtx::RX, SdoCs::InitiateDownload) => {
+                    if command_byte & 0b10 == 0b10 { // expedited
+                        SdoCmd::WriteExpeditedRx(SdoWriteExpeditedRx::decode(frame)?)
+                    } else {
+                        todo!() // yet to implement segmented writes
+                    }
+                },
+            (Rxtx::TX, SdoCs::InitiateDownload) => {
+                    if command_byte & 0b10 == 0b10 { // expedited
+                        SdoCmd::WriteExpeditedTx(SdoWriteExpeditedTx::decode(frame)?)
+                    } else {
+                        todo!() // yet to implement segmented writes
+                    }
+                },
+            _ => todo!() // yet to implement other sdo commands
+        };
+        let sdo = Sdo{
             node_id,
-            command: data[0],
-            index,
-            sub_index,
-            data: sdo_data,
-            sdo_type,
-        })
+            command,
+            rxtx,
+        };
+        Ok(sdo)
     }
 
     fn encode(&self, frame: &mut socketcan::CanFrame) {
-        frame.set_id(u16_as_id(self.node_id.into()));
-        let mut c = std::io::Cursor::new(Vec::new());
-        self.write(&mut c);
-        frame.set_data(c.get_ref());
+        frame.set_id(u16_as_id((self.node_id as u16) + self.rxtx.to_u16_sdo()));
+        match &self.command {
+            SdoCmd::WriteExpeditedRx(inner) => inner.encode(frame),
+            SdoCmd::WriteExpeditedTx(inner) => inner.encode(frame),
+            _ => todo!() // yet to implement other sdo commands
+        };
+
     }
 }
 
@@ -229,55 +414,84 @@ impl TryFrom<u8> for GuardStatus {
 #[derive(Debug)]
 pub struct Guard {
     #[brw(ignore)]
-    node_id: u8, // Derived from the header
+    node_id: u8,
 
     #[br(temp)]
-    #[bw(calc = (*status as u8)  | ((*toggle_bit as u8) << 7))]
+    #[bw(calc = (*status as u8)  | ((*toggle as u8) << 7))]
     raw_byte: u8,
 
     #[br(calc = raw_byte & 0x80 != 0)]
     #[bw(ignore)]
-    toggle_bit: bool,
+    toggle: bool,
 
-    #[br(try_map = |x: u8| (x & 0x7F).try_into())]
+    #[br(try_calc = (raw_byte & 0x7F).try_into())]
     #[bw(ignore)]
     status: GuardStatus,
+}
+
+impl Guard {
+    pub fn new(node_id: u8, toggle: bool, status: GuardStatus) -> Self {
+        Self {
+            node_id, toggle, status
+        }
+    }
 }
 
 impl FrameRW for Guard {
     fn decode(frame: &socketcan::CanFrame) -> Result<Guard, CanOpenError> {
         let data = frame.data();
-        if data.len() < 1 {
+        if data.is_empty() {
             return Err(CanOpenError::ParseError("data too short".to_owned()));
         }
 
         let id = id_as_raw_std(frame)?;
-        if id < 0x700 || id > 0x77F {
+        if !(0x700..=0x77F).contains(&id) {
             return Err(CanOpenError::BadMessage("wrong id".to_owned()));
         }
         Guard::read(&mut std::io::Cursor::new(&data)).map_err(|e| CanOpenError::ParseError(format!("no parse: {e}")))
     }
 
     fn encode(&self, frame: &mut socketcan::CanFrame) {
-        frame.set_id(u16_as_id(self.node_id as u16));
+        frame.set_id(u16_as_id(0x700 + self.node_id as u16));
         let mut c = std::io::Cursor::new(Vec::new());
-        self.write(&mut c);
-        frame.set_data(c.get_ref());
+        self.write(&mut c).unwrap();
+        frame.set_data(c.get_ref()).unwrap();
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum Rxtx {
-    RX,
+/// Rxtx realtive to the device (aka server)
+/// Data sent from your computer is probably Rx,
+/// since the device is receiving it)
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rxtx {
+    #[default] RX,
     TX,
+}
+impl Rxtx {
+    pub fn to_u16_sdo(&self) -> u16 {
+        match self {
+            Rxtx::RX => 0x600,
+            Rxtx::TX => 0x580,
+        }
+    }
+    pub fn from_u16_sdo(id: u16) -> Self {
+        if id & 0x780 == 0x580 { Rxtx::TX } else { Rxtx::RX }
+    }
 }
 
 #[derive(Debug)]
 pub struct Pdo {
+    node_id: u8,
     pdo_index: u8, // PDO index (1 to 4)
     rxtx: Rxtx,
-    node_id: u8, // Derived from the header
     data: Vec<u8>, // Data (1 to 8 bytes)
+}
+
+impl Pdo {
+    pub fn new(node_id: u8, pdo_index: u8, data: &[u8]) -> Self {
+        Self {node_id, pdo_index, rxtx: Rxtx::RX, data: data.to_owned()}
+    }
+
 }
 
 impl FrameRW for Pdo {
@@ -291,7 +505,7 @@ impl FrameRW for Pdo {
         } else { Rxtx::RX };
 
         // this is a bit odd, RX indicies are offset by one
-        let pdo_index = ((id & 0x700) as u8) + if rxtx == Rxtx::RX { 1 } else { 0 }; 
+        let pdo_index = (((id & 0x700) >> 8) as u8) - if rxtx == Rxtx::RX { 1u8 } else { 0u8 }; 
 
         let node_id = (id & 0x7F) as u8;
 
@@ -304,7 +518,8 @@ impl FrameRW for Pdo {
     }
 
     fn encode(&self, frame: &mut socketcan::CanFrame) {
-        frame.set_id(u16_as_id(self.node_id as u16));
+        let id = (self.pdo_index as u16 + if self.rxtx == Rxtx::RX { 1 } else { 0 }) << 8;
+        frame.set_id(u16_as_id(self.node_id as u16 + id));
         frame.set_data(&self.data);
     }
 }
@@ -392,37 +607,17 @@ impl Conn {
         let frame = self.socket.read_frame()
             .map_err(|e| CanOpenError::ConnectionError(e.to_string()))?;
         Self::decode(&frame)
-        //match p {
-        //    Message::Nmt => { 
-        //        Message::Nmt(Nmt::decode(&frame)?);
-        //    },
-        //    Message::Sync => Sync::decode(&frame).map(Box::new),
-        //    //Message::Emergency => Emergency::decode(&frame).map(Box::new),
-        //    //Message::Pdo => Pdo::decode(&frame).map(Box::new),
-        //    //Message::Sdo => Sdo::decode(&frame).map(Box::new),
-        //    //Message::Guard => Guard::decode(&frame).map(Box::new),
-        //};
-
-
-        //let message = if let Some(nmt) = Nmt::decode(&frame) {
-        //    Some(FrameRW::Nmt(nmt))
-        //} else if let Some(sync) = Sync::decode(&frame) {
-        //    Some(FrameRW::Sync(sync))
-        //} else if let Some(emergency) = Emergency::decode(&frame) {
-        //    Some(FrameRW::Emergency(emergency))
-        //} else if let Some(sdo) = Sdo::decode(&frame) {
-        //    Some(FrameRW::Sdo(sdo))
-        //} else if let Some(guard) = Guard::decode(&frame) {
-        //    Some(FrameRW::Guard(guard))
-        //} else { Pdo::decode(&frame).map(FrameRW::Pdo) };
-        //message.ok_or(CanOpenError::ParseError("frame {frame:?} did not decode as any canopen function".to_owned()))
     }
 
     pub fn send(&self, message: Message) -> Result<(), CanOpenError> {
         let mut frame = socketcan::CanFrame::new(socketcan::Id::Standard(socketcan::StandardId::new(0).unwrap()), &[]).unwrap();
         match message {
             Message::Sdo(sdo) => sdo.encode(&mut frame),
+            Message::Pdo(pdo) => pdo.encode(&mut frame),
             Message::Sync(sync) => sync.encode(&mut frame),
+            Message::Nmt(nmt) => nmt.encode(&mut frame),
+            Message::Emergency(emergency) => emergency.encode(&mut frame),
+            Message::Guard(guard) => guard.encode(&mut frame),
             _ => todo!()
         }
         self.socket.write_frame(&frame).map_err(CanOpenError::IOError)
@@ -449,181 +644,5 @@ impl Conn {
 
     }
 }
-
-use std::collections::HashMap;
-
-
-type ObjectDictionary = HashMap<u16, Vec<u8>>;
-//#[derive(Debug, Clone)]
-//struct ObjectDictionary {
-//    pub data: HashMap<u16, Vec<u8>>,
-//}
-//
-//impl ObjectDictionary {
-//    fn new() -> Self {
-//        ObjectDictionary {
-//            data: HashMap::new(),
-//        }
-//    }
-//
-//}
-
-#[derive(Debug)]
-pub struct Node {
-    conn: Conn,
-    object_dictionary: ObjectDictionary,
-}
-
-impl Node {
-    fn new(conn: Conn, object_dictionary: ObjectDictionary) -> Self {
-        Node {
-            conn,
-            object_dictionary,
-        }
-    }
-
-    fn serve(&mut self) {
-        loop {
-            match self.conn.recv() {
-                Ok(Message::Sdo(sdo)) => {
-                    if sdo.sdo_type == SdoType::Expedited && (sdo.command & 0x2F) == 0x20 {
-                        self.object_dictionary.insert(sdo.index, sdo.data.to_vec());
-                        self.send_sdo_confirmation(sdo.node_id, sdo.index, sdo.sub_index);
-                    }
-                },
-                Err(e) => {
-                    // Handle error, possibly log it or break the loop
-                    eprintln!("Error receiving message: {:?}", e);
-                },
-                _ => {
-                    // Handle other message types or do nothing
-                }
-            }
-        }
-    }
-
-   fn send_sdo_confirmation(&self, node_id: u8, index: u16, sub_index: u8) {
-        // Create an SDO confirmation frame
-        // For an expedited write confirmation, the command specifier is generally 0x60 combined with the sub command
-        let command_specifier = 0x60;
-
-        // Construct the data for the frame: command + index + sub_index + empty data
-        let mut data = [0u8; 8];
-        data[0] = command_specifier;
-        data[1..3].copy_from_slice(&index.to_le_bytes());
-        data[3] = sub_index;
-
-        // The COB-ID for SDO Transmit is 0x580 + node ID
-        let cob_id = 0x580 + node_id as u16;
-
-        // Create the frame and send it
-        let frame = mk_can_frame(cob_id, &data);
-            
-        self.conn.socket.write_frame_insist(&frame);
-
-    }
-
-   fn extract_tpdo_configs(&self) -> Vec<(u32, TpdoType, Vec<(u16, u8, u8)>)> {
-        let mut tpdo_configs = Vec::new();
-
-        // Assuming TPDOs are configured at standard indexes
-        // Adjust these indexes according to your specific CANOpen implementation
-        const TPDO_CONFIG_START_INDEX: u16 = 0x1A00;
-        const NUMBER_OF_TPDOS: u16 = 4; // Adjust based on how many TPDOs are supported
-
-        for i in 0..NUMBER_OF_TPDOS {
-            let pdo_index = TPDO_CONFIG_START_INDEX + i;
-            if let Some((cob_id, tpdo_type, mappings)) = self.decode_pdo_config(pdo_index) {
-                tpdo_configs.push((cob_id, tpdo_type, mappings));
-            }
-        }
-
-        tpdo_configs
-    }
-
-    fn decode_pdo_config(&self, pdo_index: u16) -> Option<(u32, TpdoType, Vec<(u16, u8, u8)>)> {
-        // COB-ID for the PDO, defaulting to 0x180 + node_id
-        let cob_id = self.object_dictionary.get(&pdo_index).unwrap_or(&vec![0x00, 0x01]).clone();
-
-        // Parse the COB-ID (assuming it's 4 bytes, little endian)
-        let cob_id = u32::from_le_bytes([cob_id[0], cob_id[1], cob_id[2], cob_id[3]]);
-
-        // Get the transmission type
-        let type_field = self.object_dictionary.get(&(pdo_index + 1)).unwrap_or(&vec![0x00]).clone();
-        let tpdo_type = match type_field[0] {
-            0 => TpdoType::AcyclicSynchronous,
-            1..=240 => TpdoType::CyclicSynchronous(type_field[0]),
-            252 => TpdoType::SynchronousRtrOnly,
-            253 => TpdoType::AsynchronousRtrOnly,
-            254..=255 => TpdoType::Asynchronous,
-            _ => return None,
-        };
-
-        // Parse PDO mapping (assuming it starts from sub-index 1)
-        // Each entry is 4 bytes long: 2 bytes for index, 1 byte for subindex, 1 byte for length
-        let mut mappings = Vec::new();
-        for i in 1..=8 {
-            if let Some(entry) = self.object_dictionary.get(&(pdo_index + 0x200 + i)) {
-                if entry.len() == 4 {
-                    let index = u16::from_le_bytes([entry[0], entry[1]]);
-                    let sub_index = entry[2];
-                    let length = entry[3];
-                    mappings.push((index, sub_index, length));
-                }
-            }
-        }
-
-        Some((cob_id, tpdo_type, mappings))
-    }
-
-    fn handle_sync(&self) {
-        for (cob_id, tpdo_type, mappings) in &self.extract_tpdo_configs() {
-            if self.should_send_tpdo(tpdo_type) {
-                let tpdo_data = self.construct_tpdo_data(mappings);
-                self.send_tpdo(*cob_id, &tpdo_data);
-            }
-        }
-    }
-
-    fn should_send_tpdo(&self, tpdo_type: &TpdoType) -> bool {
-        // Determine if a TPDO should be sent based on its type and current conditions
-        match tpdo_type {
-            TpdoType::CyclicSynchronous(sync_rate) => {
-                // Implement logic for cyclic synchronous TPDOs
-                // For example, send on every SYNC message or based on a divisor of SYNC rate
-                true // Placeholder, implement actual logic
-            }
-            TpdoType::Asynchronous => {
-                // Implement logic for asynchronous TPDOs
-                false // Placeholder, implement actual logic
-            }
-            // Handle other TPDO types
-            _ => false,
-        }
-    }
-
-    fn construct_tpdo_data(&self, mappings: &[(u16, u8, u8)]) -> Vec<u8> {
-        // Construct the TPDO data based on the mappings
-        let mut tpdo_data = Vec::new();
-        for (index, sub_index, length) in mappings {
-            if let Some(data) = self.object_dictionary.get(index) {
-                // Extract the specified bytes from the object dictionary entry
-                // Placeholder: Implement logic to handle sub-indices and lengths
-                tpdo_data.extend_from_slice(data);
-            }
-        }
-        tpdo_data
-    }
-
-    fn send_tpdo(&self, cob_id: u32, data: &[u8]) -> Result<(), CanOpenError> {
-        let frame = mk_can_frame(cob_id as u16, data);
-
-        self.conn.socket.write_frame_insist(&frame);
-
-        Ok(())
-    }
-}
-
-
 
 

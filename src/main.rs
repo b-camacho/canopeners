@@ -1,15 +1,39 @@
-
+use canopeners::{Sdo, Pdo, Nmt, Emergency, Guard, GuardStatus, SdoCmd, Message, Conn};
+use canopeners::enums::EmergencyErrorRegister;
 fn sender() {
-    let conn = canopeners::Conn::new("vcan0").unwrap();
-    let msg = canopeners::Sdo{};
-    conn.send(canopeners::Message::Sync(msg));
-
+    let conn = Conn::new("vcan0").unwrap();
+    let sdo = Sdo::new_write(10, 1, 2, Box::new([3, 4, 0]));
+    conn.send(Message::Sdo(sdo)).unwrap();
+    let pdo = Pdo::new(10, 1, &[3, 4, 0]);
+    conn.send(Message::Pdo(pdo)).unwrap();
+    let nmt = Nmt::new(canopeners::NmtFunction::EnterOperational, 10);
+    conn.send(Message::Nmt(nmt)).unwrap();
+    let emergency = Emergency::new(
+        10,
+        canopeners::enums::EmergencyErrorCode::AmbientTemperature,
+        vec![EmergencyErrorRegister::Temperature],
+        &[1, 2]
+        );
+    conn.send(Message::Emergency(emergency)).unwrap();
+    let guard = Guard::new(10, false, GuardStatus::Operational);
+    conn.send(Message::Guard(guard)).unwrap();
 }
 
 fn receiver() {
-    let conn = canopeners::Conn::new("vcan0").unwrap();
-    let msg = conn.recv();
-    dbg!(msg);
+    let conn = Conn::new("vcan0").unwrap();
+    loop {
+        let msg = conn.recv();
+        match msg {
+            Ok(Message::Sdo(sdo)) => {
+                dbg!(&sdo);
+                match &sdo.command {
+                    SdoCmd::WriteExpeditedRx(inner) => conn.send(Message::Sdo(Sdo::new_write_resp(sdo.node_id, inner.index, inner.sub_index))).unwrap(),
+                    _ => todo!()
+                };
+            },
+            any => { dbg!(any);} ,
+        }
+    }
 }
 
 fn main() {
@@ -17,5 +41,6 @@ fn main() {
         s.spawn(sender);
         s.spawn(receiver);
     })
+
 
 }
