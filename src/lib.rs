@@ -8,8 +8,7 @@ use binrw::{
 };
 
 pub mod enums;
-
-
+pub mod od;
 
 trait FrameRW {
     fn encode(&self, frame: &mut socketcan::CanFrame);
@@ -106,7 +105,6 @@ pub struct Emergency {
     error_register: Vec<enums::EmergencyErrorRegister>,
 
     vendor_specific: [u8; 5],
-
 }
 
 impl Emergency {
@@ -482,7 +480,8 @@ impl Rxtx {
 #[derive(Debug)]
 pub struct Pdo {
     node_id: u8,
-    pdo_index: u8, // PDO index (1 to 4)
+    pdo_index: u8, // todo: there are up to 512 PDO indicies actually
+                   // the 4 currently supported ones are just the "default" indicies
     rxtx: Rxtx,
     data: Vec<u8>, // Data (1 to 8 bytes)
 }
@@ -524,15 +523,6 @@ impl FrameRW for Pdo {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-enum TpdoType {
-    AcyclicSynchronous,
-    CyclicSynchronous(u8), // The value represents the SYNC interval divisor
-    SynchronousRtrOnly,
-    AsynchronousRtrOnly,
-    Asynchronous,
-    // Add more types or specific variants if needed
-}
 
 #[derive(Debug)]
 pub struct Sync;
@@ -641,7 +631,6 @@ impl Conn {
             _ => todo!()
         };
         Ok(p)
-
     }
 }
 
