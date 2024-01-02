@@ -3,16 +3,17 @@
 # ⚠️ WIP ⚠️
 It doesn't work quite yet, but soon it will!
 
-# Canopeners
+# canopeners
 Incomplete, but easy to use implementation of the CANOpen standard in Rust.
 
 # TODO
 - [x] enum for all message types (can't use impl trait as function return type)
 - [x] send/receive SDO
 - [x] stateless example over vcan
-- [ ] object dictionary representations
-- [ ] Node impl sending TPDOs based on SYNC msgs
 - [ ] segmented SDO
 - [ ] porcelain wrappers for easy send/receive over SDO
 - [ ] convert simple.rs example into tests
+- [ ] fix cargo warns
+- [ ] fix clippy lints
+- [ ] Node impl sending TPDOs based on SYNC msgs
 
