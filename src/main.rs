@@ -23,16 +23,7 @@ fn receiver() {
     let conn = Conn::new("vcan0").unwrap();
     loop {
         let msg = conn.recv();
-        match msg {
-            Ok(Message::Sdo(sdo)) => {
-                dbg!(&sdo);
-                match &sdo.command {
-                    SdoCmd::WriteExpeditedRx(inner) => conn.send(Message::Sdo(Sdo::new_write_resp(sdo.node_id, inner.index, inner.sub_index))).unwrap(),
-                    _ => todo!()
-                };
-            },
-            any => { dbg!(any);} ,
-        }
+        dbg!(msg);
     }
 }
 
