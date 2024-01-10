@@ -12,6 +12,7 @@ Incomplete, but easy to use implementation of the CANOpen standard in Rust.
 - [x] stateless example over vcan
 - [ ] segmented SDO
 - [ ] porcelain wrappers for easy send/receive over SDO
+- [ ] package.nix
 - [ ] convert simple.rs example into tests
 - [ ] fix cargo warns
 - [ ] fix clippy lints
