@@ -916,26 +916,29 @@ impl Conn {
         self.socket.set_read_timeout(t).map_err(CanOpenError::IOError)
     }
 
-    fn send_sdo_acked(&self, message: Sdo, node_id: u8) -> Result<(), CanOpenError> {
+    fn send_sdo_acked(&self, message: Sdo, node_id: u8) -> Result<Sdo, CanOpenError> {
         self.send(&Message::Sdo(message.clone()))?;
         loop {
             let resp = self.recv()?;
-            if Self::is_sdo_ack(resp, &message.command, node_id)? {
-                return Ok(());
+            if Self::is_sdo_ack(&resp, &message.command, node_id)? {
+                match resp {
+                    Message::Sdo(sdo) => return Ok(sdo),
+                    _ => unreachable!()
+                }
             };
         }
     }
 
     fn is_sdo_ack(
-        message: Message,
+        message: &Message,
         command: &SdoCmd,
         node_id: u8,
     ) -> Result<bool, CanOpenError> {
         match message {
             Message::Sdo(sdo) if sdo.node_id == node_id => {
-                match sdo.command {
+                match &sdo.command {
                     SdoCmd::AbortTransfer(e) => Err(CanOpenError::SdoAbortTransfer(e.abort_code)),
-                    cmd if SdoCmd::is_response_to(command, &cmd) => Ok(true),
+                    cmd if SdoCmd::is_response_to(command, cmd) => Ok(true),
                     _ => Ok(false),
                 }
             }
@@ -1005,11 +1008,35 @@ impl Conn {
         }
     }
 
-    pub fn sdo_read(&mut self, node_id: u8, index: u16, sub_index: u8) -> Box<[u8]> {
-        self.send_sdo_acked(Sdo { node_id, , command: SdoCmd::InitiateUploadRx(), rxtx: Rxtx::RX }, node_id)
+    pub fn sdo_read(&mut self, node_id: u8, index: u16, sub_index: u8) -> Result<Box<[u8]>, CanOpenError> {
+        let res = self.send_sdo_acked(Sdo { node_id,
+            command: SdoCmd::InitiateUploadRx(SdoCmdInitiateUploadRx{ index, sub_index }),
+            rxtx: Rxtx::RX }, node_id)?;
 
-
-
+         match res.command {
+            SdoCmd::InitiateUploadTx(SdoCmdInitiateUploadTx{index: _, sub_index: _, payload: SdoCmdInitiatePayload::Expedited(data)}) => {
+                return Ok(data.into())
+            }
+            SdoCmd::InitiateUploadTx(SdoCmdInitiateUploadTx{index: _, sub_index: _, payload: SdoCmdInitiatePayload::Segmented(maybe_len)}) => {
+                let mut buffer = Vec::new();
+                let mut toggle = false;
+                if let Some(len) = maybe_len {
+                    buffer.reserve(len as usize);
+                };
+                loop {
+                    let seg = self.send_sdo_acked(Sdo{ rxtx: Rxtx::RX, node_id, command: SdoCmd::UploadSegmentRx(SdoCmdUploadSegmentRx { toggle })}, node_id)?;
+                    if let Sdo{rxtx: _, node_id: _, command: SdoCmd::UploadSegmentTx(command)} = seg {
+                        buffer.extend_from_slice(&command.data);
+                        if command.last {
+                            break
+                        }
+                    }
+                    toggle = !toggle;
+                }
+                Ok(buffer.into())
+            },
+            _ => unreachable!()
+        }
     }
 
     pub fn send(&self, message: &Message) -> Result<(), CanOpenError> {
