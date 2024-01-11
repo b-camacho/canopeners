@@ -8,7 +8,7 @@ use canopeners::{
 
 fn sender(done: &AtomicBool) {
     let mut conn = Conn::new("vcan0").unwrap();
-    let pdo = Pdo::new(10, 1, &[3, 4, 0]);
+    let pdo = Pdo::new(10, 1, &[3, 4, 0]).unwrap();
     conn.send(&Message::Pdo(pdo)).unwrap();
     let nmt = Nmt::new(canopeners::NmtFunction::EnterOperational, 10);
     conn.send(&Message::Nmt(nmt)).unwrap();
@@ -86,6 +86,7 @@ fn receiver(done: &AtomicBool) {
             })) => {
                 let last = upload_data_iter + 7 > upload_data.len();
                 let data = &upload_data[upload_data_iter..(std::cmp::min(upload_data_iter+7, upload_data.len()))];
+                upload_data_iter += 7;
                 conn.send(&Message::Sdo(Sdo{node_id, rxtx: Rxtx::TX, command: SdoCmd::UploadSegmentTx(SdoCmdUploadSegmentTx{
                     toggle,
                     data: data.into(),

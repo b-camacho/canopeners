@@ -33,10 +33,6 @@ fn u16_as_id(id: u16) -> socketcan::StandardId {
     socketcan::StandardId::new(id).unwrap()
 }
 
-fn mk_can_frame(cob_id: u16, data: &[u8]) -> socketcan::CanDataFrame {
-    socketcan::CanDataFrame::new(socketcan::StandardId::new(cob_id).unwrap(), data).unwrap()
-}
-
 #[binrw]
 #[brw(little)]
 #[derive(Clone, Debug)]
@@ -63,8 +59,8 @@ impl FrameRW for Nmt {
     fn encode(&self, frame: &mut socketcan::CanFrame) {
         frame.set_id(u16_as_id(0x000));
         let mut c = std::io::Cursor::new(Vec::new());
-        self.write(&mut c);
-        frame.set_data(c.get_ref());
+        self.write(&mut c).unwrap();
+        frame.set_data(c.get_ref()).unwrap();
     }
 }
 
@@ -282,7 +278,7 @@ impl SdoCmdInitiatePayload {
 impl SdoCmdInitiateDownloadRx {
     fn encode(&self, frame: &mut socketcan::CanFrame) {
         let mut data = [0u8; 8];
-        let mut command_byte = 0b00100000;
+        let command_byte = 0b00100000;
 
         data[0] = command_byte;
         data[1..3].copy_from_slice(&self.index.to_le_bytes());
@@ -395,7 +391,7 @@ pub struct SdoCmdInitiateUploadRx {
 impl SdoCmdInitiateUploadRx {
     fn encode(&self, frame: &mut socketcan::CanFrame) {
         let mut data = [0u8; 8];
-        let mut command_byte = 0b010 << 5;
+        let command_byte = 0b010 << 5;
         data[0] = command_byte;
         data[1..3].copy_from_slice(&self.index.to_le_bytes());
         data[3] = self.sub_index;
@@ -423,7 +419,7 @@ pub struct SdoCmdInitiateUploadTx {
 impl SdoCmdInitiateUploadTx {
     fn encode(&self, frame: &mut socketcan::CanFrame) {
         let mut data = [0u8; 8];
-        let mut command_byte = 0b010 << 5;
+        let command_byte = 0b010 << 5;
         data[0] = command_byte;
         data[1..3].copy_from_slice(&self.index.to_le_bytes());
         data[3] = self.sub_index;
@@ -476,8 +472,7 @@ pub struct SdoCmdUploadSegmentTx {
 impl SdoCmdUploadSegmentTx {
     fn encode(&self, frame: &mut socketcan::CanFrame) {
         let mut data = [0u8; 8];
-        data[0] = (0b011 << 5)
-            | ((self.toggle as u8) << 4)
+        data[0] = ((self.toggle as u8) << 4)
             | ((7 - self.data.len() as u8) << 1)
             | (self.last as u8);
         data[1..1 + self.data.len()].copy_from_slice(&self.data);
@@ -487,7 +482,7 @@ impl SdoCmdUploadSegmentTx {
     fn decode(frame: &socketcan::CanFrame) -> Result<Self, CanOpenError> {
         let command_byte = frame.data()[0];
         let toggle = command_byte & 0b10000 != 0;
-        let size = (0b111 & (command_byte >> 1)) as usize;
+        let size = 7 - (0b111 & (command_byte >> 1)) as usize;
         let last = command_byte & 0b1 != 0;
         let mut data = Vec::new();
         data.extend_from_slice(&frame.data()[1..size]);
@@ -642,6 +637,18 @@ impl FrameRW for Sdo {
             (Rxtx::TX, SdoCmdSpec::DownloadSegment) => {
                 SdoCmd::DownloadSegmentTx(SdoCmdDownloadSegmentTx::decode(frame)?)
             }
+            (Rxtx::RX, SdoCmdSpec::InitiateUpload) => {
+                SdoCmd::InitiateUploadRx(SdoCmdInitiateUploadRx::decode(frame)?)
+            }
+            (Rxtx::RX, SdoCmdSpec::UploadSegment) => {
+                SdoCmd::UploadSegmentRx(SdoCmdUploadSegmentRx::decode(frame)?)
+            }
+            (Rxtx::TX, SdoCmdSpec::InitiateUpload) => {
+                SdoCmd::InitiateUploadTx(SdoCmdInitiateUploadTx::decode(frame)?)
+            }
+            (Rxtx::TX, SdoCmdSpec::UploadSegment) => {
+                SdoCmd::UploadSegmentTx(SdoCmdUploadSegmentTx::decode(frame)?)
+            }
             (_, SdoCmdSpec::AbortTransfer) => {
                 SdoCmd::AbortTransfer(SdoCmdAbortTransfer::decode(frame)?)
             }
@@ -785,13 +792,16 @@ pub struct Pdo {
 }
 
 impl Pdo {
-    pub fn new(node_id: u8, pdo_index: u8, data: &[u8]) -> Self {
-        Self {
+    pub fn new(node_id: u8, pdo_index: u8, data: &[u8]) -> Result<Self, CanOpenError> {
+        if !(1..=8).contains(&data.len()) {
+            return Err(CanOpenError::BadMessage(format!("got {} bytes of PDO data, expected between 1 and 8 bytes", data.len())))
+        }
+        Ok(Self {
             node_id,
             pdo_index,
             rxtx: Rxtx::RX,
             data: data.to_owned(),
-        }
+        })
     }
 }
 
@@ -819,7 +829,8 @@ impl FrameRW for Pdo {
     fn encode(&self, frame: &mut socketcan::CanFrame) {
         let id = (self.pdo_index as u16 + if self.rxtx == Rxtx::RX { 1 } else { 0 }) << 8;
         frame.set_id(u16_as_id(self.node_id as u16 + id));
-        frame.set_data(&self.data);
+        // unwrap wont panic here, we guarantee data is between 1 and 8 bytes
+        frame.set_data(&self.data).unwrap();
     }
 }
 
@@ -830,19 +841,17 @@ impl FrameRW for Sync {
     fn decode(frame: &socketcan::CanFrame) -> Result<Sync, CanOpenError> {
         let id = id_as_raw_std(frame)?;
         if id != 0x80 {
-            return Err(todo!()); // Not a valid Sync COB-ID
+            Err(CanOpenError::BadMessage(format!("not a SYNC cob-id: {id}")))
+        } else  if !frame.data().is_empty() {
+            Err(CanOpenError::BadMessage(format!("data section of SYNC message should be empty, found {} bytes", frame.data().len())))
+        } else {
+            Ok(Sync {})
         }
-
-        if !frame.data().is_empty() {
-            return Err(todo!()); // Sync message should not have any data
-        }
-
-        Ok(Sync {})
     }
 
     fn encode(&self, frame: &mut socketcan::CanFrame) {
         frame.set_id(u16_as_id(0x80));
-        frame.set_data(&[]);
+        frame.set_data(&[]).unwrap();
     }
 }
 
@@ -1015,7 +1024,7 @@ impl Conn {
 
          match res.command {
             SdoCmd::InitiateUploadTx(SdoCmdInitiateUploadTx{index: _, sub_index: _, payload: SdoCmdInitiatePayload::Expedited(data)}) => {
-                return Ok(data.into())
+                Ok(data)
             }
             SdoCmd::InitiateUploadTx(SdoCmdInitiateUploadTx{index: _, sub_index: _, payload: SdoCmdInitiatePayload::Segmented(maybe_len)}) => {
                 let mut buffer = Vec::new();
@@ -1052,7 +1061,6 @@ impl Conn {
             Message::Nmt(nmt) => nmt.encode(&mut frame),
             Message::Emergency(emergency) => emergency.encode(&mut frame),
             Message::Guard(guard) => guard.encode(&mut frame),
-            _ => todo!(),
         }
         self.socket
             .write_frame(&frame)
