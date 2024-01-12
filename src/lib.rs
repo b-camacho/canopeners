@@ -144,8 +144,8 @@ impl FrameRW for Emergency {
     fn encode(&self, frame: &mut socketcan::CanFrame) {
         frame.set_id(u16_as_id(0x80 + self.node_id as u16));
         let mut c = std::io::Cursor::new(Vec::new());
-        self.write(&mut c);
-        frame.set_data(c.get_ref());
+        self.write(&mut c).unwrap();
+        frame.set_data(c.get_ref()).unwrap();
     }
 }
 
@@ -223,7 +223,7 @@ impl SdoCmdInitiatePayload {
                 } << 2;
                 command_byte |= l;
                 command_byte |= 0b11;
-                data[4..4 + exp_data.len()].copy_from_slice(&exp_data);
+                data[4..4 + exp_data.len()].copy_from_slice(exp_data);
             }
             SdoCmdInitiatePayload::Segmented(Some(size)) => {
                 command_byte |= 0b01;
@@ -316,7 +316,7 @@ impl SdoCmdInitiateDownloadTx {
         data[0] = 0b01100000;
         data[1..3].copy_from_slice(&self.index.to_le_bytes());
         data[3] = self.sub_index;
-        frame.set_data(&data);
+        frame.set_data(&data).unwrap();
     }
 
     fn decode(frame: &socketcan::CanFrame) -> Result<Self, CanOpenError> {
@@ -344,7 +344,7 @@ impl SdoCmdDownloadSegmentRx {
         data[0] =
             ((self.toggle as u8) << 4) | ((7 - self.data.len() as u8) << 1) | (self.last as u8);
         data[1..1 + self.data.len()].copy_from_slice(&self.data);
-        frame.set_data(&data);
+        frame.set_data(&data).unwrap();
     }
 
     fn decode(frame: &socketcan::CanFrame) -> Result<Self, CanOpenError> {
@@ -372,7 +372,7 @@ impl SdoCmdDownloadSegmentTx {
     fn encode(&self, frame: &mut socketcan::CanFrame) {
         let mut data = [0u8; 8];
         data[0] = 0b001 << 5 | ((self.toggle as u8) << 4);
-        frame.set_data(&data);
+        frame.set_data(&data).unwrap();
     }
 
     fn decode(frame: &socketcan::CanFrame) -> Result<Self, CanOpenError> {
@@ -452,7 +452,7 @@ impl SdoCmdUploadSegmentRx {
     fn encode(&self, frame: &mut socketcan::CanFrame) {
         let mut data = [0u8; 8];
         data[0] = 0b011 << 5 | ((self.toggle as u8) << 4);
-        frame.set_data(&data);
+        frame.set_data(&data).unwrap();
     }
 
     fn decode(frame: &socketcan::CanFrame) -> Result<Self, CanOpenError> {
@@ -476,7 +476,7 @@ impl SdoCmdUploadSegmentTx {
             | ((7 - self.data.len() as u8) << 1)
             | (self.last as u8);
         data[1..1 + self.data.len()].copy_from_slice(&self.data);
-        frame.set_data(&data);
+        frame.set_data(&data).unwrap();
     }
 
     fn decode(frame: &socketcan::CanFrame) -> Result<Self, CanOpenError> {
@@ -696,7 +696,7 @@ impl TryFrom<u8> for GuardStatus {
             0x04 => Ok(GuardStatus::Stopped),
             0x05 => Ok(GuardStatus::Operational),
             0x7F => Ok(GuardStatus::PreOperational),
-            _ => Err(format!("{value:x} not a valid guard status").to_owned()),
+            _ => Err(format!("{value:x} not a valid guard status")),
         }
     }
 }
@@ -1010,7 +1010,7 @@ impl Conn {
                         }),
                     };
                     toggle = !toggle;
-                    self.send_sdo_acked(message, node_id);
+                    self.send_sdo_acked(message, node_id)?;
                 }
                 Ok(())
             }
@@ -1068,7 +1068,7 @@ impl Conn {
     }
 
     fn decode(frame: &socketcan::CanFrame) -> Result<Message, CanOpenError> {
-        let id = id_as_raw_std(&frame).unwrap();
+        let id = id_as_raw_std(frame).unwrap();
         // can_id is node_id + protocol_id (same as function id)
         // can_ids are always <128
         // mask out lowest 7 bits to just get the protocol_id
