@@ -6,6 +6,10 @@ It doesn't work quite yet, but soon it will!
 # canopeners
 Incomplete, but easy to use implementation of the CANOpen standard in Rust.
 
+# building
+`nix develop`
+`cargo build`
+
 # TODO
 - [x] enum for all message types (can't use impl trait as function return type)
 - [x] send/receive SDO
