@@ -25,7 +25,9 @@ fn sender(done: &AtomicBool) {
     conn.sdo_write(0x10, 0x1000, 1, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
         .unwrap();
 
-    conn.sdo_read(0x10, 0x1000, 1).unwrap();
+    let sdo_read_res = conn.sdo_read(0x10, 0x1000, 1).unwrap();
+    let sdo_read_exp: Box<[u8]> = Box::new([10, 9, 8, 7, 6, 5, 4, 3, 2, 1]);
+    assert_eq!(sdo_read_exp, sdo_read_res);
 
     done.store(true, std::sync::atomic::Ordering::SeqCst);
 }
@@ -34,6 +36,9 @@ fn receiver(done: &AtomicBool) {
     let conn = Conn::new("vcan0").unwrap();
     conn.set_read_timeout(std::time::Duration::from_millis(10))
         .unwrap();
+    conn.set_write_timeout(std::time::Duration::from_millis(10))
+        .unwrap();
+    let mut download_data = Vec::new();
     let upload_data = &[10, 9, 8, 7, 6, 5, 4, 3, 2, 1];
     let mut upload_data_iter = 0;
     while !done.load(SeqCst) {
@@ -52,17 +57,22 @@ fn receiver(done: &AtomicBool) {
                     sub_index: payload.sub_index,
                 }),
             })),
+
             Ok(Message::Sdo(Sdo {
                 command: SdoCmd::DownloadSegmentRx(payload),
                 node_id,
                 rxtx: Rxtx::RX,
-            })) => conn.send(&Message::Sdo(Sdo {
-                node_id,
-                rxtx: Rxtx::TX,
-                command: SdoCmd::DownloadSegmentTx(SdoCmdDownloadSegmentTx {
-                    toggle: payload.toggle,
-                }),
-            })),
+            })) => {
+                download_data.extend_from_slice(&payload.data);
+                conn.send(&Message::Sdo(Sdo {
+                    node_id,
+                    rxtx: Rxtx::TX,
+                    command: SdoCmd::DownloadSegmentTx(SdoCmdDownloadSegmentTx {
+                        toggle: payload.toggle,
+                    }),
+                }))
+            }
+
             Ok(Message::Sdo(Sdo {
                 node_id,
                 rxtx: Rxtx::RX,
@@ -76,6 +86,7 @@ fn receiver(done: &AtomicBool) {
                     payload: SdoCmdInitiatePayload::Segmented(Some(10)),
                 }),
             })),
+
             Ok(Message::Sdo(Sdo {
                 node_id,
                 rxtx: Rxtx::RX,
@@ -102,9 +113,12 @@ fn receiver(done: &AtomicBool) {
         }
         .unwrap();
     }
+
+    assert_eq!(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10], download_data.as_slice());
 }
 
-fn main() {
+#[test]
+fn send_recv() {
     let done = std::sync::atomic::AtomicBool::new(false);
     std::thread::scope(|s| {
         s.spawn(|| sender(&done));

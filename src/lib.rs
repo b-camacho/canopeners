@@ -12,7 +12,6 @@ trait FrameRW {
     fn decode(frame: &socketcan::CanFrame) -> Result<Self, CanOpenError>
     where
         Self: Sized;
-    //fn id(&self) -> Option<u16>;
 }
 
 // CAN ids can only be standard (11bit), not extended (29bit)
@@ -191,7 +190,6 @@ impl SdoCmd {
     }
 }
 
-
 #[derive(Clone, Debug)]
 pub struct SdoCmdInitiateDownloadRx {
     pub index: u16,
@@ -353,7 +351,7 @@ impl SdoCmdDownloadSegmentRx {
         let size = 7 - (0b111 & (command_byte >> 1)) as usize;
         let last = command_byte & 0b1 != 0;
         let mut data = Vec::new();
-        data.extend_from_slice(&frame.data()[1..size]);
+        data.extend_from_slice(&frame.data()[1..1 + size]);
 
         Ok(Self {
             toggle,
@@ -472,9 +470,8 @@ pub struct SdoCmdUploadSegmentTx {
 impl SdoCmdUploadSegmentTx {
     fn encode(&self, frame: &mut socketcan::CanFrame) {
         let mut data = [0u8; 8];
-        data[0] = ((self.toggle as u8) << 4)
-            | ((7 - self.data.len() as u8) << 1)
-            | (self.last as u8);
+        data[0] =
+            ((self.toggle as u8) << 4) | ((7 - self.data.len() as u8) << 1) | (self.last as u8);
         data[1..1 + self.data.len()].copy_from_slice(&self.data);
         frame.set_data(&data).unwrap();
     }
@@ -485,7 +482,7 @@ impl SdoCmdUploadSegmentTx {
         let size = 7 - (0b111 & (command_byte >> 1)) as usize;
         let last = command_byte & 0b1 != 0;
         let mut data = Vec::new();
-        data.extend_from_slice(&frame.data()[1..size]);
+        data.extend_from_slice(&frame.data()[1..1 + size]);
 
         Ok(Self {
             toggle,
@@ -794,7 +791,10 @@ pub struct Pdo {
 impl Pdo {
     pub fn new(node_id: u8, pdo_index: u8, data: &[u8]) -> Result<Self, CanOpenError> {
         if !(1..=8).contains(&data.len()) {
-            return Err(CanOpenError::BadMessage(format!("got {} bytes of PDO data, expected between 1 and 8 bytes", data.len())))
+            return Err(CanOpenError::BadMessage(format!(
+                "got {} bytes of PDO data, expected between 1 and 8 bytes",
+                data.len()
+            )));
         }
         Ok(Self {
             node_id,
@@ -842,8 +842,11 @@ impl FrameRW for Sync {
         let id = id_as_raw_std(frame)?;
         if id != 0x80 {
             Err(CanOpenError::BadMessage(format!("not a SYNC cob-id: {id}")))
-        } else  if !frame.data().is_empty() {
-            Err(CanOpenError::BadMessage(format!("data section of SYNC message should be empty, found {} bytes", frame.data().len())))
+        } else if !frame.data().is_empty() {
+            Err(CanOpenError::BadMessage(format!(
+                "data section of SYNC message should be empty, found {} bytes",
+                frame.data().len()
+            )))
         } else {
             Ok(Sync {})
         }
@@ -913,16 +916,20 @@ impl Conn {
     }
 
     pub fn recv(&self) -> Result<Message, CanOpenError> {
-        let frame = self
-            .socket
-            .read_frame()
-            .map_err(CanOpenError::IOError)?;
+        let frame = self.socket.read_frame().map_err(CanOpenError::IOError)?;
         Self::decode(&frame)
     }
 
-
     pub fn set_read_timeout(&self, t: std::time::Duration) -> Result<(), CanOpenError> {
-        self.socket.set_read_timeout(t).map_err(CanOpenError::IOError)
+        self.socket
+            .set_read_timeout(t)
+            .map_err(CanOpenError::IOError)
+    }
+
+    pub fn set_write_timeout(&self, t: std::time::Duration) -> Result<(), CanOpenError> {
+        self.socket
+            .set_write_timeout(t)
+            .map_err(CanOpenError::IOError)
     }
 
     fn send_sdo_acked(&self, message: Sdo, node_id: u8) -> Result<Sdo, CanOpenError> {
@@ -932,25 +939,19 @@ impl Conn {
             if Self::is_sdo_ack(&resp, &message.command, node_id)? {
                 match resp {
                     Message::Sdo(sdo) => return Ok(sdo),
-                    _ => unreachable!()
+                    _ => unreachable!(),
                 }
             };
         }
     }
 
-    fn is_sdo_ack(
-        message: &Message,
-        command: &SdoCmd,
-        node_id: u8,
-    ) -> Result<bool, CanOpenError> {
+    fn is_sdo_ack(message: &Message, command: &SdoCmd, node_id: u8) -> Result<bool, CanOpenError> {
         match message {
-            Message::Sdo(sdo) if sdo.node_id == node_id => {
-                match &sdo.command {
-                    SdoCmd::AbortTransfer(e) => Err(CanOpenError::SdoAbortTransfer(e.abort_code)),
-                    cmd if SdoCmd::is_response_to(command, cmd) => Ok(true),
-                    _ => Ok(false),
-                }
-            }
+            Message::Sdo(sdo) if sdo.node_id == node_id => match &sdo.command {
+                SdoCmd::AbortTransfer(e) => Err(CanOpenError::SdoAbortTransfer(e.abort_code)),
+                cmd if SdoCmd::is_response_to(command, cmd) => Ok(true),
+                _ => Ok(false),
+            },
             _ => Ok(false),
         }
     }
@@ -1017,34 +1018,62 @@ impl Conn {
         }
     }
 
-    pub fn sdo_read(&mut self, node_id: u8, index: u16, sub_index: u8) -> Result<Box<[u8]>, CanOpenError> {
-        let res = self.send_sdo_acked(Sdo { node_id,
-            command: SdoCmd::InitiateUploadRx(SdoCmdInitiateUploadRx{ index, sub_index }),
-            rxtx: Rxtx::RX }, node_id)?;
+    pub fn sdo_read(
+        &mut self,
+        node_id: u8,
+        index: u16,
+        sub_index: u8,
+    ) -> Result<Box<[u8]>, CanOpenError> {
+        let res = self.send_sdo_acked(
+            Sdo {
+                node_id,
+                command: SdoCmd::InitiateUploadRx(SdoCmdInitiateUploadRx { index, sub_index }),
+                rxtx: Rxtx::RX,
+            },
+            node_id,
+        )?;
 
-         match res.command {
-            SdoCmd::InitiateUploadTx(SdoCmdInitiateUploadTx{index: _, sub_index: _, payload: SdoCmdInitiatePayload::Expedited(data)}) => {
-                Ok(data)
-            }
-            SdoCmd::InitiateUploadTx(SdoCmdInitiateUploadTx{index: _, sub_index: _, payload: SdoCmdInitiatePayload::Segmented(maybe_len)}) => {
+        match res.command {
+            SdoCmd::InitiateUploadTx(SdoCmdInitiateUploadTx {
+                index: _,
+                sub_index: _,
+                payload: SdoCmdInitiatePayload::Expedited(data),
+            }) => Ok(data),
+            SdoCmd::InitiateUploadTx(SdoCmdInitiateUploadTx {
+                index: _,
+                sub_index: _,
+                payload: SdoCmdInitiatePayload::Segmented(maybe_len),
+            }) => {
                 let mut buffer = Vec::new();
                 let mut toggle = false;
                 if let Some(len) = maybe_len {
                     buffer.reserve(len as usize);
                 };
                 loop {
-                    let seg = self.send_sdo_acked(Sdo{ rxtx: Rxtx::RX, node_id, command: SdoCmd::UploadSegmentRx(SdoCmdUploadSegmentRx { toggle })}, node_id)?;
-                    if let Sdo{rxtx: _, node_id: _, command: SdoCmd::UploadSegmentTx(command)} = seg {
+                    let seg = self.send_sdo_acked(
+                        Sdo {
+                            rxtx: Rxtx::RX,
+                            node_id,
+                            command: SdoCmd::UploadSegmentRx(SdoCmdUploadSegmentRx { toggle }),
+                        },
+                        node_id,
+                    )?;
+                    if let Sdo {
+                        rxtx: _,
+                        node_id: _,
+                        command: SdoCmd::UploadSegmentTx(command),
+                    } = seg
+                    {
                         buffer.extend_from_slice(&command.data);
                         if command.last {
-                            break
+                            break;
                         }
                     }
                     toggle = !toggle;
                 }
                 Ok(buffer.into())
-            },
-            _ => unreachable!()
+            }
+            _ => unreachable!(),
         }
     }
 
