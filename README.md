@@ -17,7 +17,7 @@ Incomplete, but easy to use implementation of the CANOpen standard in Rust.
 - [x] segmented SDO
 - [x] porcelain wrappers for easy send/receive over SDO
 - [ ] finish replacing manual bit manipulation with binrw
-- [ ] package.nix
+- [x] package.nix
 - [ ] convert simple.rs example into tests
 - [ ] fix cargo warns
 - [ ] fix clippy lints
