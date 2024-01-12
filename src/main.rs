@@ -1,8 +1,7 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::SeqCst;
-use canopeners::enums::EmergencyErrorRegister;
 use canopeners::{
-    Conn, Emergency, Guard, GuardStatus, Message, Nmt, Pdo, Sdo, SdoCmd, SdoCmdInitiateDownloadTx, Rxtx, SdoCmdDownloadSegmentTx, SdoCmdInitiateUploadRx, SdoCmdInitiateUploadTx, SdoCmdDownloadSegmentRx,SdoCmdUploadSegmentTx, SdoCmdInitiatePayload, SdoCmdUploadSegmentRx
+    Conn, Emergency, Guard, GuardStatus, Message, Nmt, Pdo, Sdo, SdoCmd, SdoCmdInitiateDownloadTx, Rxtx, SdoCmdDownloadSegmentTx, SdoCmdInitiateUploadRx, SdoCmdInitiateUploadTx, SdoCmdUploadSegmentTx, SdoCmdInitiatePayload, SdoCmdUploadSegmentRx, enums::EmergencyErrorRegister
 };
 
 
@@ -37,7 +36,6 @@ fn receiver(done: &AtomicBool) {
     let mut upload_data_iter = 0;
     while !done.load(SeqCst) {
         let msg = conn.recv();
-        //dbg!(&msg);
 
         match msg {
             Ok(Message::Sdo(Sdo {
@@ -72,7 +70,6 @@ fn receiver(done: &AtomicBool) {
                 rxtx: Rxtx::RX,
                 command: SdoCmd::InitiateUploadRx(SdoCmdInitiateUploadRx{index, sub_index})
             })) => {
-                //println!("got InitiateUpload command for index {index} sub_index {sub_index}");
                 conn.send(&Message::Sdo(Sdo{node_id, rxtx: Rxtx::TX, command: SdoCmd::InitiateUploadTx(SdoCmdInitiateUploadTx{
                     index,
                     sub_index,
