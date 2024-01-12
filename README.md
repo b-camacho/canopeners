@@ -19,7 +19,7 @@ Incomplete, but easy to use implementation of the CANOpen standard in Rust.
 - [ ] finish replacing manual bit manipulation with binrw
 - [x] package.nix
 - [ ] convert simple.rs example into tests
-- [ ] fix cargo warns
-- [ ] fix clippy lints
+- [x] fix cargo warns
+- [x] fix clippy lints
 - [ ] Node impl sending TPDOs based on SYNC msgs
 
