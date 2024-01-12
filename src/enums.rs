@@ -40,18 +40,18 @@ pub enum EmergencyErrorCode {
 }
 
 impl EmergencyErrorCode {
-     pub fn decode(code: u16) -> Result<Self, CanOpenError> {
+    pub fn decode(code: u16) -> Result<Self, CanOpenError> {
         match code {
-            0x8110          => Some(Self::CommunicationCanOverrun),
-            0x8120          => Some(Self::CommunicationErrorPassiveMode),
-            0x8130          => Some(Self::CommunicationLifeGuardError),
-            0x8140          => Some(Self::CommunicationRecoveredBusOff),
-            0x8150          => Some(Self::CommunicationCanIdCollision),
-            0x8210          => Some(Self::ProtocolErrorPdoLength),
-            0x8220          => Some(Self::ProtocolErrorPdoLengthExceeded),
-            0x8230          => Some(Self::ProtocolErrorDamMpdo),
-            0x8240          => Some(Self::ProtocolErrorUnexpectedSyncLength),
-            0x8250          => Some(Self::ProtocolErrorRpdoTimeout),
+            0x8110 => Some(Self::CommunicationCanOverrun),
+            0x8120 => Some(Self::CommunicationErrorPassiveMode),
+            0x8130 => Some(Self::CommunicationLifeGuardError),
+            0x8140 => Some(Self::CommunicationRecoveredBusOff),
+            0x8150 => Some(Self::CommunicationCanIdCollision),
+            0x8210 => Some(Self::ProtocolErrorPdoLength),
+            0x8220 => Some(Self::ProtocolErrorPdoLengthExceeded),
+            0x8230 => Some(Self::ProtocolErrorDamMpdo),
+            0x8240 => Some(Self::ProtocolErrorUnexpectedSyncLength),
+            0x8250 => Some(Self::ProtocolErrorRpdoTimeout),
             0x2100..=0x21FF => Some(Self::CurrentInputSide),
             0x2200..=0x22FF => Some(Self::CurrentInsideDevice),
             0x2300..=0x23FF => Some(Self::CurrentOutputSide),
@@ -87,9 +87,10 @@ impl EmergencyErrorCode {
             0x0000..=0x00FF => Some(Self::ErrorResetOrNoError),
             0x1000..=0x10FF => Some(Self::GenericError),
             _ => None,
-        }.ok_or_else(|| CanOpenError::ParseError(format!("bad error code: {}", code)))
+        }
+        .ok_or_else(|| CanOpenError::ParseError(format!("bad error code: {}", code)))
     }
-     pub fn encode(&self) -> u16 {
+    pub fn encode(&self) -> u16 {
         match self {
             Self::ErrorResetOrNoError => 0x0000,
             Self::GenericError => 0x1000,
@@ -145,14 +146,30 @@ pub enum EmergencyErrorRegister {
 impl EmergencyErrorRegister {
     pub fn decode(code: u8) -> Vec<Self> {
         let mut errors = Vec::new();
-        if code & 0x01 != 0 { errors.push(Self::GenericError); }
-        if code & 0x02 != 0 { errors.push(Self::Current); }
-        if code & 0x04 != 0 { errors.push(Self::Voltage); }
-        if code & 0x08 != 0 { errors.push(Self::Temperature); }
-        if code & 0x10 != 0 { errors.push(Self::CommunicationError); }
-        if code & 0x20 != 0 { errors.push(Self::DeviceProfileSpecific); }
-        if code & 0x40 != 0 { errors.push(Self::Reserved); }
-        if code & 0x80 != 0 { errors.push(Self::ManufacturerSpecific); }
+        if code & 0x01 != 0 {
+            errors.push(Self::GenericError);
+        }
+        if code & 0x02 != 0 {
+            errors.push(Self::Current);
+        }
+        if code & 0x04 != 0 {
+            errors.push(Self::Voltage);
+        }
+        if code & 0x08 != 0 {
+            errors.push(Self::Temperature);
+        }
+        if code & 0x10 != 0 {
+            errors.push(Self::CommunicationError);
+        }
+        if code & 0x20 != 0 {
+            errors.push(Self::DeviceProfileSpecific);
+        }
+        if code & 0x40 != 0 {
+            errors.push(Self::Reserved);
+        }
+        if code & 0x80 != 0 {
+            errors.push(Self::ManufacturerSpecific);
+        }
         errors
     }
 
@@ -173,4 +190,3 @@ impl EmergencyErrorRegister {
         code
     }
 }
-
