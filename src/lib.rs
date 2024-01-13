@@ -497,7 +497,7 @@ pub struct SdoCmdAbortTransfer {
     pub index: u16,
     pub sub_index: u8,
     // TODO: translate abort codes from CIA301 page 61 into a thiserror enum
-    pub abort_code: u32,
+    pub abort_code: enums::AbortCode,
 }
 
 impl SdoCmdAbortTransfer {
@@ -507,7 +507,7 @@ impl SdoCmdAbortTransfer {
         data[0] = command_byte;
         data[1..3].copy_from_slice(&self.index.to_le_bytes());
         data[3] = self.sub_index;
-        data[4..8].copy_from_slice(&self.abort_code.to_le_bytes());
+        data[4..8].copy_from_slice(&self.abort_code.encode().to_le_bytes());
         frame.set_data(&data).unwrap();
     }
 
@@ -518,7 +518,10 @@ impl SdoCmdAbortTransfer {
                 .map_err(|_| CanOpenError::ParseError("not enough data".to_owned()))?,
         );
         let sub_index = frame.data()[3];
-        let abort_code = u32::from_le_bytes(frame.data()[4..8].try_into().unwrap());
+        let abort_code_u32 = u32::from_le_bytes(frame.data()[4..8].try_into().unwrap());
+        let abort_code = enums::AbortCode::decode(abort_code_u32)
+            .ok_or_else(|| CanOpenError::ParseError(format!("invalid abort code: {abort_code_u32}")))?;
+
         Ok(Self {
             index,
             sub_index,
@@ -835,6 +838,9 @@ impl FrameRW for Pdo {
 }
 
 #[derive(Debug)]
+/// Sync messages are usually sent at regular intervals.
+/// A remote node may 
+/// Can be used for keeping remote node's clocks in sync.
 pub struct Sync;
 
 impl FrameRW for Sync {
@@ -896,8 +902,8 @@ pub enum CanOpenError {
     #[error("Not yet implemented: {0}")]
     NotYetImplemented(String),
 
-    #[error("SDO AbortTransfer error, abort code: {0}")]
-    SdoAbortTransfer(u32),
+    #[error("SDO AbortTransfer error, abort code: {0:?}")]
+    SdoAbortTransfer(enums::AbortCode),
 
     #[error("IO Error: {0}")]
     IOError(std::io::Error),
@@ -948,7 +954,7 @@ impl Conn {
     fn is_sdo_ack(message: &Message, command: &SdoCmd, node_id: u8) -> Result<bool, CanOpenError> {
         match message {
             Message::Sdo(sdo) if sdo.node_id == node_id => match &sdo.command {
-                SdoCmd::AbortTransfer(e) => Err(CanOpenError::SdoAbortTransfer(e.abort_code)),
+                SdoCmd::AbortTransfer(e) => Err(CanOpenError::SdoAbortTransfer(e.abort_code.clone())),
                 cmd if SdoCmd::is_response_to(command, cmd) => Ok(true),
                 _ => Ok(false),
             },
