@@ -152,7 +152,7 @@ impl FrameRW for Emergency {
 pub struct Sdo {
     pub node_id: u8,     // Derived from the header
     pub command: SdoCmd, // command specifier
-    pub rxtx: Rxtx,
+    pub reqres: ReqRes,
 }
 
 #[derive(Clone, Debug)]
@@ -538,13 +538,13 @@ impl SdoCmdAbortTransfer {
 /// so download = client to server, upload = server to client.
 ///
 /// When writing less than 4 bytes, you send a `InitiateDownload` RX,
-/// the device ACKs it with `InitiateDownload` TX
+/// the device ACKs it with `InitiateDownload` Res
 ///
 /// When writing more than 4 bytes, you send an `InitiateDownload` RX
 /// with the "segmented" flag set and the # of bytes you'll send in the data field.
-/// The device still acks this with `InitiateDownload` TX.
+/// The device still acks this with `InitiateDownload` Res.
 /// After this, you send each segment with a `DownloadSegment`. The device still ACKs each segment.
-/// The `DownloadSegment` TX can carry at most 8 bytes
+/// The `DownloadSegment` Res can carry at most 8 bytes
 ///
 /// Reading works symmetrically to writing
 #[derive(Clone, Debug, PartialEq)]
@@ -559,20 +559,20 @@ enum SdoCmdSpec {
 }
 
 impl SdoCmdSpec {
-    pub fn from_byte(byte: u8, rxtx: Rxtx) -> Result<SdoCmdSpec, CanOpenError> {
+    pub fn from_byte(byte: u8, reqres: ReqRes) -> Result<SdoCmdSpec, CanOpenError> {
         use SdoCmdSpec::*;
-        let v = match (rxtx, byte >> 5) {
+        let v = match (reqres, byte >> 5) {
             // meaning of the command specifier is slightly different for Rx and Tx
             // thx: https://github.com/wireshark/wireshark/blob/master/epan/dissectors/packet-canopen.c#L511
-            (Rxtx::RX, 0x00) => DownloadSegment,
-            (Rxtx::RX, 0x01) => InitiateDownload,
-            (Rxtx::RX, 0x02) => InitiateUpload,
-            (Rxtx::RX, 0x03) => UploadSegment,
+            (ReqRes::Req, 0x00) => DownloadSegment,
+            (ReqRes::Req, 0x01) => InitiateDownload,
+            (ReqRes::Req, 0x02) => InitiateUpload,
+            (ReqRes::Req, 0x03) => UploadSegment,
 
-            (Rxtx::TX, 0x00) => UploadSegment,
-            (Rxtx::TX, 0x01) => DownloadSegment,
-            (Rxtx::TX, 0x02) => InitiateUpload,
-            (Rxtx::TX, 0x03) => InitiateDownload,
+            (ReqRes::Res, 0x00) => UploadSegment,
+            (ReqRes::Res, 0x01) => DownloadSegment,
+            (ReqRes::Res, 0x02) => InitiateUpload,
+            (ReqRes::Res, 0x03) => InitiateDownload,
 
             (_, 0x04) => AbortTransfer,
             (_, 0x05) => BlockUpload,
@@ -592,7 +592,7 @@ impl Sdo {
     pub fn new_write(node_id: u8, index: u16, sub_index: u8, data: Box<[u8]>) -> Sdo {
         Sdo {
             node_id,
-            rxtx: Rxtx::RX,
+            reqres: ReqRes::Req,
             command: SdoCmd::InitiateDownloadRx(SdoCmdInitiateDownloadRx {
                 index,
                 sub_index,
@@ -603,7 +603,7 @@ impl Sdo {
     pub fn new_write_resp(node_id: u8, index: u16, sub_index: u8) -> Sdo {
         Sdo {
             node_id,
-            rxtx: Rxtx::TX,
+            reqres: ReqRes::Res,
             command: SdoCmd::InitiateDownloadTx(SdoCmdInitiateDownloadTx { index, sub_index }),
         }
     }
@@ -621,32 +621,32 @@ impl FrameRW for Sdo {
         }
 
         let node_id = (id & 0x7F) as u8;
-        let rxtx = Rxtx::from_u16_sdo(id);
+        let reqres = ReqRes::from_u16_sdo(id);
 
-        let command_spec = SdoCmdSpec::from_byte(data[0], rxtx)?;
-        let command = match (rxtx, command_spec) {
-            (Rxtx::RX, SdoCmdSpec::InitiateDownload) => {
+        let command_spec = SdoCmdSpec::from_byte(data[0], reqres)?;
+        let command = match (reqres, command_spec) {
+            (ReqRes::Req, SdoCmdSpec::InitiateDownload) => {
                 SdoCmd::InitiateDownloadRx(SdoCmdInitiateDownloadRx::decode(frame)?)
             }
-            (Rxtx::RX, SdoCmdSpec::DownloadSegment) => {
+            (ReqRes::Req, SdoCmdSpec::DownloadSegment) => {
                 SdoCmd::DownloadSegmentRx(SdoCmdDownloadSegmentRx::decode(frame)?)
             }
-            (Rxtx::TX, SdoCmdSpec::InitiateDownload) => {
+            (ReqRes::Res, SdoCmdSpec::InitiateDownload) => {
                 SdoCmd::InitiateDownloadTx(SdoCmdInitiateDownloadTx::decode(frame)?)
             }
-            (Rxtx::TX, SdoCmdSpec::DownloadSegment) => {
+            (ReqRes::Res, SdoCmdSpec::DownloadSegment) => {
                 SdoCmd::DownloadSegmentTx(SdoCmdDownloadSegmentTx::decode(frame)?)
             }
-            (Rxtx::RX, SdoCmdSpec::InitiateUpload) => {
+            (ReqRes::Req, SdoCmdSpec::InitiateUpload) => {
                 SdoCmd::InitiateUploadRx(SdoCmdInitiateUploadRx::decode(frame)?)
             }
-            (Rxtx::RX, SdoCmdSpec::UploadSegment) => {
+            (ReqRes::Req, SdoCmdSpec::UploadSegment) => {
                 SdoCmd::UploadSegmentRx(SdoCmdUploadSegmentRx::decode(frame)?)
             }
-            (Rxtx::TX, SdoCmdSpec::InitiateUpload) => {
+            (ReqRes::Res, SdoCmdSpec::InitiateUpload) => {
                 SdoCmd::InitiateUploadTx(SdoCmdInitiateUploadTx::decode(frame)?)
             }
-            (Rxtx::TX, SdoCmdSpec::UploadSegment) => {
+            (ReqRes::Res, SdoCmdSpec::UploadSegment) => {
                 SdoCmd::UploadSegmentTx(SdoCmdUploadSegmentTx::decode(frame)?)
             }
             (_, SdoCmdSpec::AbortTransfer) => {
@@ -657,13 +657,13 @@ impl FrameRW for Sdo {
         let sdo = Sdo {
             node_id,
             command,
-            rxtx,
+            reqres,
         };
         Ok(sdo)
     }
 
     fn encode(&self, frame: &mut socketcan::CanFrame) {
-        frame.set_id(u16_as_id((self.node_id as u16) + self.rxtx.to_u16_sdo()));
+        frame.set_id(u16_as_id((self.node_id as u16) + self.reqres.to_u16_sdo()));
         match &self.command {
             SdoCmd::InitiateUploadRx(inner) => inner.encode(frame),
             SdoCmd::InitiateDownloadRx(inner) => inner.encode(frame),
@@ -754,20 +754,20 @@ impl FrameRW for Guard {
     }
 }
 
-/// Rxtx realtive to the device (aka server)
+/// ReqRes realtive to the device (aka server)
 /// Data sent from your computer is probably Rx,
 /// since the device is receiving it)
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Rxtx {
+pub enum ReqRes {
     #[default]
-    RX,
-    TX,
+    Req,
+    Res,
 }
-impl Rxtx {
+impl ReqRes {
     pub fn to_u16_sdo(&self) -> u16 {
         match self {
-            Rxtx::RX => 0x600,
-            Rxtx::TX => 0x580,
+            ReqRes::Req => 0x600,
+            ReqRes::Res => 0x580,
         }
     }
     // TODO: SDO can go over other CAN IDs
@@ -776,9 +776,9 @@ impl Rxtx {
     // as I have not seen other SDOs in the wild
     pub fn from_u16_sdo(id: u16) -> Self {
         if id & 0x780 == 0x580 {
-            Rxtx::TX
+            ReqRes::Res
         } else {
-            Rxtx::RX
+            ReqRes::Req
         }
     }
 }
@@ -787,7 +787,7 @@ impl Rxtx {
 pub struct Pdo {
     node_id: u8,
     pdo_index: u8, // PDO index (1 to 4)
-    rxtx: Rxtx,
+    reqres: ReqRes,
     data: Vec<u8>, // Data (1 to 8 bytes)
 }
 
@@ -802,7 +802,7 @@ impl Pdo {
         Ok(Self {
             node_id,
             pdo_index,
-            rxtx: Rxtx::RX,
+            reqres: ReqRes::Req,
             data: data.to_owned(),
         })
     }
@@ -813,24 +813,24 @@ impl FrameRW for Pdo {
         let id = id_as_raw_std(frame)?;
         let data = frame.data().to_vec();
 
-        // Determine RX/TX and PDO index from the COB-ID
-        let rxtx = if id & 0x80 == 0 { Rxtx::TX } else { Rxtx::RX };
+        // Determine RX/Res and PDO index from the COB-ID
+        let reqres = if id & 0x80 == 0 { ReqRes::Res } else { ReqRes::Req };
 
         // this is a bit odd, RX indicies are offset by one
-        let pdo_index = (((id & 0x700) >> 8) as u8) - if rxtx == Rxtx::RX { 1u8 } else { 0u8 };
+        let pdo_index = (((id & 0x700) >> 8) as u8) - if reqres == ReqRes::Req { 1u8 } else { 0u8 };
 
         let node_id = (id & 0x7F) as u8;
 
         Ok(Pdo {
             pdo_index,
-            rxtx,
+            reqres,
             node_id,
             data,
         })
     }
 
     fn encode(&self, frame: &mut socketcan::CanFrame) {
-        let id = (self.pdo_index as u16 + if self.rxtx == Rxtx::RX { 1 } else { 0 }) << 8;
+        let id = (self.pdo_index as u16 + if self.reqres == ReqRes::Req { 1 } else { 0 }) << 8;
         frame.set_id(u16_as_id(self.node_id as u16 + id));
         // unwrap wont panic here, we guarantee data is between 1 and 8 bytes
         frame.set_data(&self.data).unwrap();
@@ -839,8 +839,8 @@ impl FrameRW for Pdo {
 
 #[derive(Debug)]
 /// Sync messages are usually sent at regular intervals.
-/// A remote node may 
-/// Can be used for keeping remote node's clocks in sync.
+/// "Synchronous events" are often driven by sync messages.
+/// For example, you can configure PDOs to be sent after every sync message.
 pub struct Sync;
 
 impl FrameRW for Sync {
@@ -976,7 +976,7 @@ impl Conn {
             1..=4 => {
                 let message = Sdo {
                     node_id,
-                    rxtx: Rxtx::RX,
+                    reqres: ReqRes::Req,
                     command: SdoCmd::InitiateDownloadRx(SdoCmdInitiateDownloadRx {
                         index,
                         sub_index,
@@ -991,7 +991,7 @@ impl Conn {
                 let mut toggle = false;
                 let init_message = Sdo {
                     node_id,
-                    rxtx: Rxtx::RX,
+                    reqres: ReqRes::Req,
                     command: SdoCmd::InitiateDownloadRx(SdoCmdInitiateDownloadRx {
                         index,
                         sub_index,
@@ -1009,7 +1009,7 @@ impl Conn {
                     let last = idx_seg_start + 7 >= n;
                     let message = Sdo {
                         node_id,
-                        rxtx: Rxtx::RX,
+                        reqres: ReqRes::Req,
                         command: SdoCmd::DownloadSegmentRx(SdoCmdDownloadSegmentRx {
                             toggle,
                             data: data[idx_seg_start..idx_seg_end].into(),
@@ -1034,7 +1034,7 @@ impl Conn {
             Sdo {
                 node_id,
                 command: SdoCmd::InitiateUploadRx(SdoCmdInitiateUploadRx { index, sub_index }),
-                rxtx: Rxtx::RX,
+                reqres: ReqRes::Req,
             },
             node_id,
         )?;
@@ -1058,14 +1058,14 @@ impl Conn {
                 loop {
                     let seg = self.send_sdo_acked(
                         Sdo {
-                            rxtx: Rxtx::RX,
+                            reqres: ReqRes::Req,
                             node_id,
                             command: SdoCmd::UploadSegmentRx(SdoCmdUploadSegmentRx { toggle }),
                         },
                         node_id,
                     )?;
                     if let Sdo {
-                        rxtx: _,
+                        reqres: _,
                         node_id: _,
                         command: SdoCmd::UploadSegmentTx(command),
                     } = seg

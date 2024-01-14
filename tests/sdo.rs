@@ -1,5 +1,5 @@
 use canopeners::{
-    enums::EmergencyErrorRegister, Conn, Emergency, Guard, GuardStatus, Message, Nmt, Pdo, Rxtx,
+    enums::EmergencyErrorRegister, Conn, Emergency, Guard, GuardStatus, Message, Nmt, Pdo, ReqRes,
     Sdo, SdoCmd, SdoCmdDownloadSegmentTx, SdoCmdInitiateDownloadTx, SdoCmdInitiatePayload,
     SdoCmdInitiateUploadRx, SdoCmdInitiateUploadTx, SdoCmdUploadSegmentRx, SdoCmdUploadSegmentTx,
 };
@@ -48,10 +48,10 @@ fn receiver(done: &AtomicBool) {
             Ok(Message::Sdo(Sdo {
                 command: SdoCmd::InitiateDownloadRx(payload),
                 node_id,
-                rxtx: Rxtx::RX,
+                reqres: ReqRes::Req,
             })) => conn.send(&Message::Sdo(Sdo {
                 node_id,
-                rxtx: Rxtx::TX,
+                reqres: ReqRes::Res,
                 command: SdoCmd::InitiateDownloadTx(SdoCmdInitiateDownloadTx {
                     index: payload.index,
                     sub_index: payload.sub_index,
@@ -61,12 +61,12 @@ fn receiver(done: &AtomicBool) {
             Ok(Message::Sdo(Sdo {
                 command: SdoCmd::DownloadSegmentRx(payload),
                 node_id,
-                rxtx: Rxtx::RX,
+                reqres: ReqRes::Req,
             })) => {
                 download_data.extend_from_slice(&payload.data);
                 conn.send(&Message::Sdo(Sdo {
                     node_id,
-                    rxtx: Rxtx::TX,
+                    reqres: ReqRes::Res,
                     command: SdoCmd::DownloadSegmentTx(SdoCmdDownloadSegmentTx {
                         toggle: payload.toggle,
                     }),
@@ -75,11 +75,11 @@ fn receiver(done: &AtomicBool) {
 
             Ok(Message::Sdo(Sdo {
                 node_id,
-                rxtx: Rxtx::RX,
+                reqres: ReqRes::Req,
                 command: SdoCmd::InitiateUploadRx(SdoCmdInitiateUploadRx { index, sub_index }),
             })) => conn.send(&Message::Sdo(Sdo {
                 node_id,
-                rxtx: Rxtx::TX,
+                reqres: ReqRes::Res,
                 command: SdoCmd::InitiateUploadTx(SdoCmdInitiateUploadTx {
                     index,
                     sub_index,
@@ -89,7 +89,7 @@ fn receiver(done: &AtomicBool) {
 
             Ok(Message::Sdo(Sdo {
                 node_id,
-                rxtx: Rxtx::RX,
+                reqres: ReqRes::Req,
                 command: SdoCmd::UploadSegmentRx(SdoCmdUploadSegmentRx { toggle }),
             })) => {
                 let last = upload_data_iter + 7 > upload_data.len();
@@ -98,7 +98,7 @@ fn receiver(done: &AtomicBool) {
                 upload_data_iter += 7;
                 conn.send(&Message::Sdo(Sdo {
                     node_id,
-                    rxtx: Rxtx::TX,
+                    reqres: ReqRes::Res,
                     command: SdoCmd::UploadSegmentTx(SdoCmdUploadSegmentTx {
                         toggle,
                         data: data.into(),
