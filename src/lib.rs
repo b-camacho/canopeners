@@ -33,9 +33,10 @@ trait FrameRW {
         Self: Sized;
 }
 
-// CAN ids can only be standard (11bit), not extended (29bit)
-// but CANOpen only uses standard
-// returns None when CanFrame has extended ID
+/// CAN ids can only be standard (11bit) or extended (29bit)
+/// CANOpen only uses the standard id bits
+/// when using extended ids, the extra bits are 0
+/// for now, this library only uses standard ids
 fn id_as_raw_std(frame: &socketcan::CanFrame) -> Result<u16, CanOpenError> {
     if let Id::Standard(sid) = frame.id() {
         Ok(sid.as_raw())

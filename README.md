@@ -31,7 +31,7 @@ Conn::new("vcan0").map(|mut conn| {
 
 Read bytes from object dictionary on a remote node:
 ```rust
-Conn::new("vcan0").map(|conn| {
+Conn::new("vcan0").map(|mut conn| {
     let res = conn.sdo_read(
     /* remote node id */ 0x10, 
     /* index */ 0x1000,
@@ -67,4 +67,5 @@ if you'd rather use your system cargo, just `cargo build` will work too
 - [x] fix clippy lints
 - [ ] add `send_acked` for all message types
 - [ ] Node impl sending TPDOs based on SYNC msgs
+- [ ] extended ID support
 
