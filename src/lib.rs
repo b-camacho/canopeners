@@ -87,8 +87,8 @@ impl FrameRW for Nmt {
 #[bw(repr(u8))]
 #[derive(Clone, Debug)]
 pub enum NmtFunction {
-    EnterOperational = 0x01,
-    EnterStop = 0x02,
+    StartRemoteNode = 0x01,
+    StopRemoteNode = 0x02,
     EnterPreOperational = 0x80,
     ResetNode = 0x81,
     ResetCommunication = 0x82,

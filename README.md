@@ -12,14 +12,14 @@ All examples are blocking. Set timeouts with `conn.set_{read_write}_timeout`.
 Send a single message:
 ```rust
 Conn::new("vcan0").map(|conn| {
-    let nmt = Nmt::new(canopeners::NmtFunction::EnterOperational, 10);
+    let nmt = Nmt::new(canopeners::NmtFunction::StartRemoteNode, 10);
     conn.send(&Message::Nmt(nmt)).unwrap();
 })
 ```
 
 Write bytes to object dictionary on a remote node:
 ```rust
-Conn::new("vcan0").map(|conn| {
+Conn::new("vcan0").map(|mut conn| {
     conn.sdo_write(
     /* remote node id */ 0x10, 
     /* index */ 0x1000,

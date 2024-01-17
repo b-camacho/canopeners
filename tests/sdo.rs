@@ -10,7 +10,7 @@ fn sender(done: &AtomicBool) {
     let mut conn = Conn::new("vcan0").unwrap();
     let pdo = Pdo::new(10, 1, &[3, 4, 0]).unwrap();
     conn.send(&Message::Pdo(pdo)).unwrap();
-    let nmt = Nmt::new(canopeners::NmtFunction::EnterOperational, 10);
+    let nmt = Nmt::new(canopeners::NmtFunction::StartRemoteNode, 10);
     conn.send(&Message::Nmt(nmt)).unwrap();
     let emergency = Emergency::new(
         10,
