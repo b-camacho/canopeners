@@ -1,8 +1,5 @@
 <img src="https://github.com/b-camacho/canopeners/assets/12277070/5314c727-6eb5-41b3-92a5-2b2abaa504c3" width="400">
 
-# ⚠️ WIP ⚠️
-It doesn't work quite yet, but soon it will!
-
 # canopeners
 Incomplete, but easy to use implementation of the CANOpen standard in Rust.
 
