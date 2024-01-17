@@ -1,9 +1,28 @@
+//! # Canopeners
+//! Partial implementation of a CANOpen client 🔪🥫 on top of socketcan
+//! Examples in readme
+//!
+//! # CANOpen
+//! As a [layer 1 and 2](https://en.wikipedia.org/wiki/OSI_model) protocol, CAN does not support
+//! addressing - all messages arrive at all nodes. CANOpen mainly adds addressing (layer 3) support
+//! to CAN in a standardized way. All CANOpen nodes have an ID, there's a standard way to address
+//! a message to a node.
+//! Various CANOpen specs also include tons of other features, this repo just focuses on CiA301.
+//!
+//! # Progress
+//! So far, we have:
+//! ✅ rusty types for most CANOpen messages
+//! ✅ send/receive messages via socketcan
+//! ✅ nice SDO wrapper.
+//! we're still missing:
+//! ❌CANOpen node (read/writable Object Dictionary, respecting the OD configs)
+//! ❌MPDO support
+//!
+
 use std::num::TryFromIntError;
 
 use binrw::{binrw, BinRead, BinWrite};
-use socketcan::EmbeddedFrame;
-use socketcan::Frame;
-use socketcan::Id;
+use socketcan::{EmbeddedFrame, Frame, Id, Socket};
 
 pub mod enums;
 
@@ -909,11 +928,15 @@ pub enum CanOpenError {
     IOError(std::io::Error),
 }
 
+/// CAN connection. Connects on `Conn::new()`
+/// Writing/reading a single CAN frame is thread safe,
+/// since socketcan guarantees atomic frame reads and writes.
+/// Multi-frame operations (eg send_acked or sdo_read) are not thread safe
+/// as they rely on receiving multiple can frames.
 #[derive(Debug)]
 pub struct Conn {
     socket: socketcan::CanSocket,
 }
-use socketcan::Socket;
 
 impl Conn {
     pub fn new(interface_name: &str) -> Result<Self, CanOpenError> {
