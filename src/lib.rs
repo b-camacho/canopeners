@@ -539,8 +539,9 @@ impl SdoCmdAbortTransfer {
         );
         let sub_index = frame.data()[3];
         let abort_code_u32 = u32::from_le_bytes(frame.data()[4..8].try_into().unwrap());
-        let abort_code = enums::AbortCode::decode(abort_code_u32)
-            .ok_or_else(|| CanOpenError::ParseError(format!("invalid abort code: {abort_code_u32}")))?;
+        let abort_code = enums::AbortCode::decode(abort_code_u32).ok_or_else(|| {
+            CanOpenError::ParseError(format!("invalid abort code: {abort_code_u32}"))
+        })?;
 
         Ok(Self {
             index,
@@ -834,7 +835,11 @@ impl FrameRW for Pdo {
         let data = frame.data().to_vec();
 
         // Determine RX/Res and PDO index from the COB-ID
-        let reqres = if id & 0x80 == 0 { ReqRes::Res } else { ReqRes::Req };
+        let reqres = if id & 0x80 == 0 {
+            ReqRes::Res
+        } else {
+            ReqRes::Req
+        };
 
         // this is a bit odd, RX indicies are offset by one
         let pdo_index = (((id & 0x700) >> 8) as u8) - if reqres == ReqRes::Req { 1u8 } else { 0u8 };
