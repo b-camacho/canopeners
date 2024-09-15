@@ -937,12 +937,18 @@ pub enum CanOpenError {
 #[derive(Debug)]
 pub struct Conn {
     socket: socketcan::CanSocket,
+    read_timeout: Option<std::time::Duration>,
+    write_timeout: Option<std::time::Duration>,
 }
 
 impl Conn {
     pub fn new(interface_name: &str) -> Result<Self, CanOpenError> {
         let socket = socketcan::CanSocket::open(interface_name).expect("no iface");
-        Ok(Conn { socket })
+        Ok(Conn {
+            socket,
+            read_timeout: None,
+            write_timeout: None,
+        })
     }
 
     pub fn recv(&self) -> Result<Message, CanOpenError> {
@@ -950,35 +956,75 @@ impl Conn {
         Self::decode(&frame)
     }
 
-    pub fn set_read_timeout(&self, t: std::time::Duration) -> Result<(), CanOpenError> {
+    pub fn set_read_timeout(&mut self, t: std::time::Duration) -> Result<(), CanOpenError> {
+        self.read_timeout = Some(t);
         self.socket
             .set_read_timeout(t)
             .map_err(CanOpenError::IOError)
     }
 
-    pub fn set_write_timeout(&self, t: std::time::Duration) -> Result<(), CanOpenError> {
+    pub fn set_write_timeout(&mut self, t: std::time::Duration) -> Result<(), CanOpenError> {
+        self.write_timeout = Some(t);
         self.socket
             .set_write_timeout(t)
             .map_err(CanOpenError::IOError)
     }
 
-    fn send_sdo_acked(&self, message: Sdo, node_id: u8) -> Result<Sdo, CanOpenError> {
+    fn send_sdo_abort(&self, node_id: u8, index: u16, sub_index: u8) -> Result<(), CanOpenError> {
+        self.send(&Message::Sdo(Sdo {
+            node_id,
+            reqres: ReqRes::Req,
+            command: SdoCmd::AbortTransfer(SdoCmdAbortTransfer {
+                index,
+                sub_index,
+                abort_code: enums::AbortCode::SdoProtocolTimedOut,
+            }),
+        }))
+    }
+
+    fn send_sdo_acked(
+        &self,
+        message: Sdo,
+        node_id: u8,
+        index: u16,
+        sub_index: u8,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<Sdo, CanOpenError> {
         self.send(&Message::Sdo(message.clone()))?;
+        let now = std::time::Instant::now();
         loop {
-            let resp = self.recv()?;
+            let resp = self.recv().or_else(|e| match e {
+                CanOpenError::IOError(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    self.send_sdo_abort(node_id, index, sub_index)?;
+                    Err(CanOpenError::SdoAbortTransfer(
+                        enums::AbortCode::SdoProtocolTimedOut,
+                    ))
+                }
+                _ => Err(e),
+            })?;
             if Self::is_sdo_ack(&resp, &message.command, node_id)? {
                 match resp {
                     Message::Sdo(sdo) => return Ok(sdo),
                     _ => unreachable!(),
                 }
             };
+            if let Some(timeout) = timeout {
+                if now.elapsed() > timeout {
+                    self.send_sdo_abort(node_id, index, sub_index)?;
+                    return Err(CanOpenError::SdoAbortTransfer(
+                        enums::AbortCode::SdoProtocolTimedOut,
+                    ));
+                }
+            }
         }
     }
 
     fn is_sdo_ack(message: &Message, command: &SdoCmd, node_id: u8) -> Result<bool, CanOpenError> {
         match message {
             Message::Sdo(sdo) if sdo.node_id == node_id => match &sdo.command {
-                SdoCmd::AbortTransfer(e) => Err(CanOpenError::SdoAbortTransfer(e.abort_code.clone())),
+                SdoCmd::AbortTransfer(e) => {
+                    Err(CanOpenError::SdoAbortTransfer(e.abort_code.clone()))
+                }
                 cmd if SdoCmd::is_response_to(command, cmd) => Ok(true),
                 _ => Ok(false),
             },
@@ -1007,7 +1053,7 @@ impl Conn {
                         payload: SdoCmdInitiatePayload::Expedited(data.into()),
                     }),
                 };
-                self.send_sdo_acked(message, node_id)?;
+                self.send_sdo_acked(message, node_id, index, sub_index, self.write_timeout)?;
                 Ok(())
             }
             // > 4 bytes - segmented write
@@ -1026,7 +1072,7 @@ impl Conn {
                         )),
                     }),
                 };
-                self.send_sdo_acked(init_message, node_id)?;
+                self.send_sdo_acked(init_message, node_id, index, sub_index, self.write_timeout)?;
 
                 for (idx_seg_start, _) in data.iter().enumerate().step_by(7) {
                     let idx_seg_end = std::cmp::min(idx_seg_start + 7, n);
@@ -1041,7 +1087,7 @@ impl Conn {
                         }),
                     };
                     toggle = !toggle;
-                    self.send_sdo_acked(message, node_id)?;
+                    self.send_sdo_acked(message, node_id, index, sub_index, self.write_timeout)?;
                 }
                 Ok(())
             }
@@ -1061,6 +1107,9 @@ impl Conn {
                 reqres: ReqRes::Req,
             },
             node_id,
+            index,
+            sub_index,
+            self.read_timeout,
         )?;
 
         match res.command {
@@ -1087,6 +1136,9 @@ impl Conn {
                             command: SdoCmd::UploadSegmentRx(SdoCmdUploadSegmentRx { toggle }),
                         },
                         node_id,
+                        index,
+                        sub_index,
+                        self.read_timeout,
                     )?;
                     if let Sdo {
                         reqres: _,

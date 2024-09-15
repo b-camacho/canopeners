@@ -33,10 +33,10 @@ fn sender(done: &AtomicBool) {
 }
 
 fn receiver(done: &AtomicBool) {
-    let conn = Conn::new("vcan0").unwrap();
-    conn.set_read_timeout(std::time::Duration::from_millis(10))
+    let mut conn = Conn::new("vcan0").unwrap();
+    conn.set_read_timeout(std::time::Duration::from_millis(1000))
         .unwrap();
-    conn.set_write_timeout(std::time::Duration::from_millis(10))
+    conn.set_write_timeout(std::time::Duration::from_millis(1000))
         .unwrap();
     let mut download_data = Vec::new();
     let upload_data = &[10, 9, 8, 7, 6, 5, 4, 3, 2, 1];
