@@ -16,25 +16,7 @@
         };
 
         rustToolchain = pkgs.rust-bin.stable."1.70.0".default;
-
-        crateRoot = ./.;
-
-        cargoToml = builtins.fromTOML (builtins.readFile "${crateRoot}/Cargo.toml");
       in {
-        packages.default = pkgs.rustPlatform.buildRustPackage {
-          pname = cargoToml.package.name;
-          version = cargoToml.package.version;
-          src = crateRoot;
-
-          cargoLock = {
-            lockFile = "${crateRoot}/Cargo.lock";
-          };
-
-          buildInputs = [ ];
-
-          nativeBuildInputs = [ rustToolchain ];
-        };
-
         devShell = pkgs.mkShell {
           buildInputs = with pkgs; [
             rustToolchain
@@ -43,3 +25,4 @@
       }
     );
 }
+
